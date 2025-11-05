@@ -7,11 +7,15 @@ This pipeline:
 3. Demonstrates joins between datasets
 4. Can generate Terraform infrastructure automatically
 
-This example shows the environment-first pattern with:
-- Provider with AwsConfig for cloud-specific settings
-- S3-specific configuration (storage classes, encryption, etc.)
-- Environment registry for shared resources
+This example demonstrates:
+- Provider with AwsConfig (determines data lives in AWS S3)
+- S3-specific configuration (storage classes, encryption, versioning)
+- Resource registry for shared buckets
 - Type-safe pipeline with explicit dependencies
+
+IMPORTANT: GlacierEnv is an execution context (DI container), NOT a deployment
+environment. Tags in AwsConfig can include deployment metadata (environment: prod),
+but that's for AWS resource tagging, not the execution context.
 
 Run with:
     # Set AWS credentials first
@@ -20,7 +24,7 @@ Run with:
     export AWS_ACCESS_KEY_ID=...
     export AWS_SECRET_ACCESS_KEY=...
 
-    # Execute locally (requires AWS credentials)
+    # Execute pipeline
     python examples/s3_pipeline.py
     # OR
     glacier run examples/s3_pipeline.py
@@ -37,25 +41,29 @@ from glacier.config import AwsConfig, S3Config
 import polars as pl
 
 # ============================================================================
-# 1. SETUP: Create environment with AWS provider
+# 1. SETUP: Create execution context with AWS provider
 # ============================================================================
 
-# Create AWS provider configuration
+# Provider configuration determines WHERE DATA LIVES
+# AwsConfig = data in AWS S3
 aws_config = AwsConfig(
     region="us-east-1",
     profile="default",  # Or use environment variables
     tags={
-        "environment": "production",
+        # These tags are applied to AWS resources (for billing, organization, etc.)
+        # They do NOT represent the execution environment
         "team": "data-analytics",
         "managed_by": "glacier",
+        "project": "customer-analytics",
     },
 )
 
 # Create provider with config injection (single Provider class!)
 provider = Provider(config=aws_config)
 
-# Create environment
-env = GlacierEnv(provider=provider, name="production")
+# Create execution context (DI container)
+# The 'name' is just an identifier for this context
+env = GlacierEnv(provider=provider, name="customer-analytics")
 
 # ============================================================================
 # 2. RESOURCES: Register shared S3 buckets with specific configs
@@ -103,31 +111,31 @@ env.register(
 )
 
 # ============================================================================
-# 3. TASKS: Define environment-bound tasks
+# 3. TASKS: Define tasks bound to execution context
 # ============================================================================
 
 
 @env.task()
 def load_sales(source) -> pl.LazyFrame:
-    """Load sales data from S3 bucket."""
+    """Load sales data from S3 bucket. Executes locally (default executor)."""
     return source.scan()
 
 
 @env.task()
 def load_customers(source) -> pl.LazyFrame:
-    """Load customer data from S3 bucket."""
+    """Load customer data from S3 bucket. Executes locally (default executor)."""
     return source.scan()
 
 
 @env.task()
 def filter_recent_sales(df: pl.LazyFrame) -> pl.LazyFrame:
-    """Filter sales from 2024."""
+    """Filter sales from 2024. Executes locally."""
     return df.filter(pl.col("date") >= pl.datetime(2024, 1, 1))
 
 
 @env.task()
 def filter_active_customers(df: pl.LazyFrame) -> pl.LazyFrame:
-    """Filter to only active customers."""
+    """Filter to only active customers. Executes locally."""
     return df.filter(pl.col("status") == "active")
 
 
@@ -135,13 +143,13 @@ def filter_active_customers(df: pl.LazyFrame) -> pl.LazyFrame:
 def join_sales_with_customers(
     sales: pl.LazyFrame, customers: pl.LazyFrame
 ) -> pl.LazyFrame:
-    """Join sales data with customer information."""
+    """Join sales data with customer information. Executes locally."""
     return sales.join(customers, on="customer_id", how="inner")
 
 
 @env.task()
 def calculate_customer_metrics(df: pl.LazyFrame) -> pl.LazyFrame:
-    """Calculate key metrics per customer."""
+    """Calculate key metrics per customer. Executes locally."""
     return df.group_by("customer_id").agg(
         [
             pl.col("amount").sum().alias("total_revenue"),
@@ -154,7 +162,7 @@ def calculate_customer_metrics(df: pl.LazyFrame) -> pl.LazyFrame:
 
 @env.task()
 def save_results(df: pl.LazyFrame) -> None:
-    """Save results to S3."""
+    """Save results to S3. Executes locally."""
     output = env.get("output_target")
     df.collect().write_parquet(output.get_uri())
     print(f"✓ Results saved to {output.get_uri()}")
@@ -168,15 +176,15 @@ def save_results(df: pl.LazyFrame) -> None:
 @env.pipeline(name="customer_analytics")
 def s3_pipeline():
     """
-    Production customer analytics pipeline on AWS S3.
+    Customer analytics pipeline using AWS S3.
 
     This pipeline demonstrates:
-    - AWS S3-specific configurations (storage classes, encryption, versioning)
-    - Environment registry for resource management
-    - Complex multi-source data processing
-    - Joins between datasets
+    - Data stored in AWS S3 (determined by provider config)
+    - All tasks execute locally (default executor="local")
+    - S3-specific configurations (storage classes, encryption, versioning)
+    - Resource registry for centralized resource management
+    - Complex multi-source data processing with joins
     - Infrastructure-from-code generation
-    - Environment-first pattern for testability
     """
     # Retrieve registered resources
     sales_source = env.get("sales_source")
@@ -208,24 +216,27 @@ if __name__ == "__main__":
     print("=" * 70)
     print("AWS S3 Customer Analytics Pipeline")
     print("=" * 70)
-    print(f"\nEnvironment: {env.name}")
-    print(f"Provider: AWS ({aws_config.region})")
-    print(f"Registered resources: {env.list_resources()}")
+    print(f"\nExecution Context: {env.name}")
+    print(f"Data Location: AWS S3 ({aws_config.region})")
+    print(f"Task Execution: Local (all tasks use executor='local')")
+    print(f"Registered Resources: {env.list_resources()}")
 
     print("\n" + "=" * 70)
-    print("Pipeline Features")
+    print("Key Concepts")
     print("=" * 70)
-    print("\n✓ AWS S3-specific configurations:")
-    print("  - Intelligent tiering for cost optimization")
-    print("  - AES256 encryption for security")
-    print("  - Versioning enabled for data lineage")
-    print("\n✓ Environment-first pattern:")
-    print("  - Explicit provider configuration")
-    print("  - Resource registry for shared buckets")
-    print("  - Type-safe task definitions")
-    print("\n✓ Infrastructure as code:")
-    print("  - Generates Terraform automatically")
-    print("  - Includes IAM policies and bucket configs")
+    print("\n✓ Provider Config determines WHERE DATA LIVES:")
+    print("  - AwsConfig → Data in AWS S3")
+    print("  - S3-specific configs: storage classes, encryption, versioning")
+    print("\n✓ Task Executor determines WHERE CODE RUNS:")
+    print("  - Default executor='local' → Code runs in local Python process")
+    print("  - Data is read from S3, processed locally, written back to S3")
+    print("\n✓ GlacierEnv is a DI Container:")
+    print("  - Binds provider, tasks, pipelines, and resources")
+    print("  - NOT a deployment environment (dev/staging/prod)")
+    print("  - Name is just an identifier")
+    print("\n✓ Infrastructure as Code:")
+    print("  - Generates Terraform automatically from pipeline definition")
+    print("  - Includes S3 buckets, IAM policies, configurations")
 
     print("\n" + "=" * 70)
     print("How to Run")

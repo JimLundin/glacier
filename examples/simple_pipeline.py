@@ -7,11 +7,15 @@ This pipeline:
 3. Aggregates by category
 4. Returns the result
 
-This example demonstrates the environment-first pattern with:
-- Provider with LocalConfig for local development
-- GlacierEnv for environment isolation
+This example demonstrates the core Glacier pattern:
+- Provider with config injection (determines WHERE DATA LIVES)
+- GlacierEnv as DI container (execution context, NOT deployment environment)
 - Environment-bound tasks
 - Type-safe pipeline definition
+
+IMPORTANT: GlacierEnv represents an EXECUTION CONTEXT (a DI container), NOT a
+deployment environment (dev/staging/prod). The provider config determines where
+your data lives (local filesystem, AWS S3, Azure Blob, GCP Storage).
 
 Run with:
     python examples/simple_pipeline.py
@@ -24,10 +28,11 @@ from glacier.config import LocalConfig
 import polars as pl
 
 # ============================================================================
-# 1. SETUP: Create environment with local provider
+# 1. SETUP: Create execution context
 # ============================================================================
 
-# Create local provider configuration
+# Provider configuration determines WHERE DATA LIVES
+# LocalConfig = data on local filesystem
 local_config = LocalConfig(
     base_path="./examples/data",
     create_dirs=True,
@@ -36,11 +41,12 @@ local_config = LocalConfig(
 # Create provider with config injection (single Provider class!)
 provider = Provider(config=local_config)
 
-# Create environment
-env = GlacierEnv(provider=provider, name="local-dev")
+# Create execution context (DI container for tasks, pipelines, and resources)
+# The 'name' parameter is just an identifier for this context
+env = GlacierEnv(provider=provider, name="simple-etl")
 
 # ============================================================================
-# 2. TASKS: Define environment-bound tasks
+# 2. TASKS: Define tasks bound to execution context
 # ============================================================================
 
 
@@ -78,10 +84,10 @@ def simple_pipeline():
     """
     Main pipeline function demonstrating Glacier basics.
 
-    This orchestrates the tasks and defines the data flow using
-    the environment-first pattern.
+    This orchestrates the tasks and defines the data flow.
     """
     # Create data source using the provider
+    # Provider knows where data lives based on its config
     data_source = env.provider.bucket(
         bucket="examples/data",
         path="sample.parquet",
@@ -101,13 +107,14 @@ def simple_pipeline():
 
 if __name__ == "__main__":
     print("=" * 60)
-    print("Simple ETL Pipeline - Glacier Environment-First Pattern")
+    print("Simple ETL Pipeline")
     print("=" * 60)
-    print(f"\nEnvironment: {env.name}")
+    print(f"\nExecution Context: {env.name}")
+    print(f"Data Location: Local filesystem ({local_config.base_path})")
     print(f"Provider: {env.provider}")
-    print(f"Configuration: {local_config}")
 
-    # Run the pipeline locally
+    # Run the pipeline
+    # All tasks execute locally (default executor="local")
     print("\nRunning pipeline...")
     result = simple_pipeline.run(mode="local")
 

@@ -99,9 +99,9 @@ This document outlines the **DI/registry-based architecture** where configuratio
    - Every dependency is visible and testable
 
 2. **Environment as Context**
-   - Tasks bound to environments, not global decorators
-   - Multiple environments can coexist (dev, staging, prod)
-   - Environment encapsulates provider, config, and execution context
+   - Tasks bound to execution contexts (GlacierEnv), not global decorators
+   - GlacierEnv is a DI container, NOT a deployment environment
+   - Environment encapsulates provider, resources, tasks, and pipelines
 
 3. **Configuration Cascade**
    - Provider-level config (AwsConfig, GcpConfig)
@@ -123,6 +123,85 @@ This document outlines the **DI/registry-based architecture** where configuratio
    - Easy to inject mock configs and providers
    - Environment isolation for unit tests
    - Clear boundaries for integration tests
+
+---
+
+## 🚨 CRITICAL: Execution Environment vs Deployment Environment
+
+**Glacier ONLY concerns itself with EXECUTION environments, NOT deployment environments.**
+
+### What Glacier Handles: EXECUTION Environments
+
+1. **Provider Config** - WHERE DATA LIVES:
+   - `AwsConfig` → Data in AWS S3
+   - `AzureConfig` → Data in Azure Blob Storage
+   - `GcpConfig` → Data in Google Cloud Storage
+   - `LocalConfig` → Data on local filesystem
+
+2. **Task Executor** - WHERE CODE RUNS:
+   - `executor="local"` → Local Python process (default)
+   - `executor="databricks"` → Databricks cluster
+   - `executor="spark"` → Spark cluster
+   - `executor="dbt"` → DBT in data warehouse
+
+3. **GlacierEnv** - DI CONTAINER:
+   - Binds provider, tasks, pipelines, and resources
+   - `name` parameter is just an identifier
+   - NOT a deployment environment (dev/staging/prod)
+
+### What Glacier Does NOT Handle: Deployment Environments
+
+**Deployment environments (dev/staging/production) are INFRASTRUCTURE concerns, NOT library concerns.**
+
+These should be handled via:
+- Separate Terraform workspaces
+- Different AWS accounts/GCP projects/Azure subscriptions
+- CI/CD pipeline configuration
+- Infrastructure-as-Code tooling
+
+**BAD - Don't do this:**
+```python
+# ❌ WRONG - Treating GlacierEnv as deployment environment
+dev_env = GlacierEnv(provider=provider, name="development")
+staging_env = GlacierEnv(provider=provider, name="staging")
+prod_env = GlacierEnv(provider=provider, name="production")
+
+# This conflates execution context with deployment environment!
+```
+
+**GOOD - Do this instead:**
+```python
+# ✅ CORRECT - GlacierEnv is just a DI container
+env = GlacierEnv(provider=provider, name="analytics-pipeline")
+
+# Deployment environment handled by infrastructure:
+# - dev: Terraform workspace "dev", AWS account 111111111111
+# - staging: Terraform workspace "staging", AWS account 222222222222
+# - prod: Terraform workspace "prod", AWS account 333333333333
+
+# Provider config can include tags for AWS resource organization:
+provider = Provider(config=AwsConfig(
+    region="us-east-1",
+    tags={"deployment": "production", "team": "data"}  # For AWS resources only
+))
+```
+
+### Key Distinctions
+
+| Aspect | Execution Environment | Deployment Environment |
+|--------|----------------------|------------------------|
+| **What** | Where code runs & data lives | Dev/staging/prod lifecycle stages |
+| **Handled by** | Glacier library | Infrastructure/CI-CD |
+| **Examples** | Local, Databricks, Spark, DBT | Development, Staging, Production |
+| **Configuration** | Provider config + task executor | Terraform workspaces, AWS accounts |
+| **Glacier API** | `GlacierEnv`, `executor` parameter | NOT part of Glacier |
+
+### Summary
+
+- **Glacier = Execution orchestration** (where code runs, where data lives)
+- **Infrastructure = Deployment management** (dev/staging/prod)
+- **GlacierEnv = DI container**, not a deployment stage
+- Provider config can include deployment metadata as AWS/Azure/GCP tags, but that's for resource organization, not execution
 
 ---
 
@@ -152,30 +231,36 @@ def my_task(source: Bucket):
     return source.scan()
 ```
 
-### 2. Environments Manage Scope
+### 2. Execution Context Manages Scope
 
-**Principle:** Tasks, resources, and execution context belong to an environment.
+**Principle:** Tasks, resources, and execution context belong to a GlacierEnv (DI container).
 
 ```python
-# Development environment
-dev_env = GlacierEnv(
-    provider=LocalProvider(config=LocalConfig(base_path="./data"))
+# Local execution - data on local filesystem
+local_env = GlacierEnv(
+    provider=Provider(config=LocalConfig(base_path="./data")),
+    name="local-pipeline"
 )
 
-# Production environment
-prod_env = GlacierEnv(
-    provider=AWSProvider(config=AwsConfig(region="us-east-1", profile="prod"))
+# Cloud execution - data in AWS S3
+cloud_env = GlacierEnv(
+    provider=Provider(config=AwsConfig(region="us-east-1")),
+    name="cloud-pipeline"
 )
 
-# Same task definition works in both
-@dev_env.task()
-def process_data(source: Bucket) -> pl.LazyFrame:
+# Same task logic works with both providers
+@local_env.task()
+def process_data_local(source) -> pl.LazyFrame:
+    # Data from local filesystem
     return source.scan()
 
-# Can also bind to prod
-@prod_env.task()
-def process_data_prod(source: Bucket) -> pl.LazyFrame:
+@cloud_env.task()
+def process_data_cloud(source) -> pl.LazyFrame:
+    # Data from AWS S3
     return source.scan()
+
+# Note: Deployment environment (dev/staging/prod) is handled by infrastructure,
+# not by GlacierEnv. Use separate Terraform workspaces or AWS accounts.
 ```
 
 ### 3. Configuration Flows Top-Down
