@@ -2,6 +2,8 @@
 
 A code-centric data pipeline library built on Polars with infrastructure-from-code generation.
 
+**⚠️ ALPHA SOFTWARE** - API may change. No backwards compatibility guarantees until v1.0.
+
 ## Philosophy
 
 **Infrastructure from Code** - Define your data pipelines in Python, and Glacier automatically generates the required cloud infrastructure (Terraform, IAM policies, etc.) by analyzing your code.
@@ -30,9 +32,9 @@ See [DESIGN_UX.md](./DESIGN_UX.md) for the full design and [ARCHITECTURE_V2.md](
 
 ## Quick Start
 
-### Environment-First Pattern (Recommended)
+### Environment-First Pattern
 
-The environment-first pattern uses dependency injection for better testability, type safety, and multi-environment support:
+Glacier uses dependency injection with `GlacierEnv` for better testability, type safety, and multi-environment support:
 
 ```python
 from glacier import GlacierEnv
@@ -127,24 +129,26 @@ def process_data(source) -> pl.LazyFrame:
 Mix different execution backends in one pipeline:
 
 ```python
-@task
+env = GlacierEnv(provider=AWSProvider(config=AwsConfig(region="us-east-1")))
+
+@env.task()
 def load_from_s3(source) -> pl.LazyFrame:
     """Runs locally."""
     return source.scan()
 
-@task(depends_on=[load_from_s3], executor="dbt")
-def transform_with_dbt() -> pl.LazyFrame:
+@env.task(executor="dbt")
+def transform_with_dbt(df: pl.LazyFrame) -> pl.LazyFrame:
     """Runs on DBT."""
     # DBT transformation logic
     pass
 
-@task(depends_on=[transform_with_dbt], executor="databricks")
-def ml_on_databricks() -> pl.LazyFrame:
+@env.task(executor="databricks")
+def ml_on_databricks(df: pl.LazyFrame) -> pl.LazyFrame:
     """Runs on Databricks."""
     # ML processing on Databricks
     pass
 
-@task(depends_on=[ml_on_databricks], executor="local")
+@env.task()
 def save_results(df: pl.LazyFrame):
     """Runs locally."""
     df.collect().write_parquet("output.parquet")
@@ -385,17 +389,14 @@ env = GlacierEnv(provider=provider, name="production")
 
 ### Providers
 
-Providers abstract over cloud platforms:
+Providers abstract over cloud platforms and require configuration classes:
 
 ```python
 from glacier.providers import AWSProvider, AzureProvider, GCPProvider, LocalProvider
 from glacier.config import AwsConfig
 
-# With config (recommended)
+# With config (required)
 provider = AWSProvider(config=AwsConfig(region="us-east-1", profile="prod"))
-
-# Simple configuration
-provider = AWSProvider(region="us-east-1")
 
 # From environment variables
 provider = AWSProvider.from_env()
@@ -428,22 +429,15 @@ data = env.get("data")
 Tasks are environment-bound functions:
 
 ```python
-# Environment-first pattern (recommended)
+# Basic task
 @env.task()
 def my_task(input: pl.LazyFrame) -> pl.LazyFrame:
     return input.filter(pl.col("value") > 0)
 
-# With configuration
+# Task with configuration
 @env.task(timeout=600, retries=3, executor="databricks")
 def heavy_task(df: pl.LazyFrame) -> pl.LazyFrame:
     return df.filter(pl.col("value") > 100)
-
-# Classic pattern (still supported)
-from glacier import task
-
-@task(depends_on=[load_data])
-def process(df: pl.LazyFrame) -> pl.LazyFrame:
-    return df.filter(pl.col("value") > 0)
 ```
 
 ### Pipelines
@@ -451,7 +445,7 @@ def process(df: pl.LazyFrame) -> pl.LazyFrame:
 Pipelines orchestrate tasks:
 
 ```python
-# Environment-first pattern (recommended)
+# Define pipeline
 @env.pipeline(name="my_pipeline")
 def my_pipeline():
     source = env.provider.bucket("data", path="input.parquet")
@@ -464,14 +458,6 @@ def my_pipeline():
 result = my_pipeline.run(mode="local")     # Run locally
 dag = my_pipeline.run(mode="analyze")      # Analyze structure
 infra = my_pipeline.run(mode="generate")   # Generate infrastructure
-
-# Classic pattern (still supported)
-from glacier import pipeline
-
-@pipeline(name="my_pipeline")
-def my_pipeline():
-    # Pipeline code...
-    pass
 ```
 
 ## Why Glacier?

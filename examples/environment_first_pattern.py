@@ -196,7 +196,10 @@ def demo_registry_pattern():
     Demonstrate environment registry for shared resources.
     """
     # Create environment
-    env = GlacierEnv(provider=AWSProvider(region="us-east-1"), name="registry-demo")
+    from glacier.config import AwsConfig
+
+    provider = AWSProvider(config=AwsConfig(region="us-east-1"))
+    env = GlacierEnv(provider=provider, name="registry-demo")
 
     # Register shared resources
     env.register("sales_raw", env.provider.bucket("sales", path="raw/data.parquet"))

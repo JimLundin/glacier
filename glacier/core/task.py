@@ -108,73 +108,13 @@ class Task:
         return f"Task(name='{self.name}', executor='{self.executor}', depends_on={deps})"
 
 
-def task(
-    func: Callable | None = None,
-    *,
-    name: str | None = None,
-    depends_on: list[Task] | Task | None = None,
-    executor: str | None = None,
-) -> Callable:
-    """
-    Decorator to mark a function as a Glacier task.
-
-    Tasks are the building blocks of pipelines. They represent transformations
-    or operations that can be composed into a DAG.
-
-    Args:
-        func: The function to wrap (automatically provided when used as @task)
-        name: Optional name for the task (defaults to function name)
-        depends_on: Task or list of Tasks this depends on (explicit, not strings!)
-        executor: Execution backend (local, databricks, dbt, spark, etc.)
-
-    Example:
-        @task
-        def load_data(source: LocalSource) -> pl.LazyFrame:
-            return source.scan()
-
-        @task(depends_on=[load_data])  # Pass the task object, not a string!
-        def clean_data(df: pl.LazyFrame) -> pl.LazyFrame:
-            return df.filter(pl.col("value").is_not_null())
-
-        @task(depends_on=[clean_data], executor="databricks")
-        def transform_on_databricks(df: pl.LazyFrame) -> pl.LazyFrame:
-            return df.with_columns([pl.col("value") * 2])
-    """
-    # Normalize depends_on to a list
-    if depends_on is None:
-        dep_list = []
-    elif isinstance(depends_on, Task):
-        dep_list = [depends_on]
-    elif isinstance(depends_on, list):
-        dep_list = depends_on
-    else:
-        # Handle case where someone passed a callable (the decorated function)
-        if hasattr(depends_on, "_glacier_task"):
-            dep_list = [depends_on._glacier_task]
-        else:
-            raise TypeError(
-                f"depends_on must be a Task, list of Tasks, or None. "
-                f"Got {type(depends_on)}. "
-                f"Did you forget to decorate the dependency with @task?"
-            )
-
-    def decorator(f: Callable) -> Callable:
-        task_obj = Task(f, name=name, depends_on=dep_list, executor=executor)
-
-        @wraps(f)
-        def wrapper(*args, **kwargs):
-            # In analysis mode, we might want to capture calls without executing
-            # For now, just execute normally
-            return task_obj(*args, **kwargs)
-
-        # Attach the Task object to the wrapper for introspection
-        wrapper._glacier_task = task_obj  # type: ignore
-        wrapper.task = task_obj  # type: ignore
-
-        return wrapper
-
-    # Support both @task and @task(...) syntax
-    if func is None:
-        return decorator
-    else:
-        return decorator(func)
+# Global task decorator has been removed.
+# Use environment-bound tasks instead: @env.task()
+#
+# Example:
+#   from glacier import GlacierEnv
+#   env = GlacierEnv(provider=provider, name="production")
+#
+#   @env.task()
+#   def my_task(source) -> pl.LazyFrame:
+#       return source.scan()

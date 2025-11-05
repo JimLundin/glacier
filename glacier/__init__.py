@@ -1,17 +1,20 @@
 """
 Glacier: Code-centric data pipeline library with infrastructure-from-code generation.
 
+⚠️ **ALPHA SOFTWARE** - API may change. No backwards compatibility guarantees until v1.0.
+
 Glacier provides cloud-agnostic abstractions for building data pipelines that can
-run on any cloud platform (AWS, Azure, GCP) or locally.
+run on any cloud platform (AWS, Azure, GCP) or locally using dependency injection
+and environment-first design.
 
 Key concepts:
 - GlacierEnv: Central orchestrator using dependency injection (environment-first pattern)
 - Providers: Factory for creating cloud-agnostic resources
 - Resources: Generic abstractions (Bucket, Serverless) that work across clouds
 - Config: Provider-specific configuration classes (AwsConfig, GcpConfig, etc.)
-- Tasks & Pipelines: Composable data transformation units
+- Tasks & Pipelines: Environment-bound, composable data transformation units
 
-Environment-First Pattern (Recommended):
+Environment-First Pattern (Only Supported Pattern):
     from glacier import GlacierEnv
     from glacier.providers import AWSProvider
     from glacier.config import AwsConfig
@@ -34,25 +37,10 @@ Environment-First Pattern (Recommended):
         data = env.provider.bucket("my-bucket", path="data.parquet")
         return process(data)
 
-Classic Pattern (Still Supported):
-    from glacier import pipeline, task
-    from glacier.providers import AWSProvider
-    import polars as pl
-
-    provider = AWSProvider(region="us-east-1")
-    data = provider.bucket("my-bucket", path="data.parquet")
-
-    @task
-    def process(source) -> pl.LazyFrame:
-        return source.scan().filter(pl.col("value") > 0)
-
-    @pipeline(name="my_pipeline")
-    def my_pipeline():
-        return process(data)
+    # 5. Execute
+    result = my_pipeline.run(mode="local")
 """
 
-from glacier.core.pipeline import pipeline
-from glacier.core.task import task
 from glacier.core.context import GlacierContext
 from glacier.core.env import GlacierEnv
 
@@ -61,14 +49,11 @@ from glacier import providers
 from glacier import resources
 from glacier import config
 
-__version__ = "0.1.0"
+__version__ = "0.1.0-alpha"
 __all__ = [
     # Core classes
     "GlacierEnv",
     "GlacierContext",
-    # Decorators (classic pattern)
-    "pipeline",
-    "task",
     # Modules
     "providers",
     "resources",

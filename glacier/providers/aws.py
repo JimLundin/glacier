@@ -15,12 +15,9 @@ class AWSProvider(Provider):
     Terraform for AWS infrastructure.
 
     Example:
-        # Simple configuration
-        provider = AWSProvider(region="us-east-1")
-
-        # With AwsConfig (recommended for environment-first pattern)
         from glacier.config import AwsConfig
 
+        # With config (required)
         aws_config = AwsConfig(
             region="us-east-1",
             profile="production",
@@ -28,88 +25,87 @@ class AWSProvider(Provider):
         )
         provider = AWSProvider(config=aws_config)
 
-        # From environment
+        # From environment variables
         provider = AWSProvider.from_env()
 
         # Create environment
         env = provider.env(name="production")
     """
 
-    def __init__(
-        self,
-        region: str | None = None,
-        profile: str | None = None,
-        account_id: str | None = None,
-        config: Any | None = None,
-        **kwargs,
-    ):
+    def __init__(self, config: Any):
         """
         Initialize AWS provider.
 
         Args:
-            region: AWS region (optional if config provided)
-            profile: AWS profile name (optional)
-            account_id: AWS account ID (optional)
-            config: AwsConfig or ProviderConfig instance (optional)
-            **kwargs: Additional configuration
+            config: AwsConfig instance (required)
+
+        Raises:
+            TypeError: If config is not provided or is not an AwsConfig
+
+        Example:
+            from glacier.config import AwsConfig
+
+            config = AwsConfig(region="us-east-1", profile="prod")
+            provider = AWSProvider(config=config)
         """
-        # Handle new AwsConfig class
-        if config is not None and hasattr(config, "model_dump"):
-            # It's an AwsConfig (Pydantic model)
-            self.region = config.region
-            self.profile = config.profile
-            self.account_id = config.account_id
-
-            # Convert AwsConfig to ProviderConfig for base class
-            provider_config = ProviderConfig(
-                provider_type="aws",
-                region=config.region,
-                credentials={
-                    "profile": config.profile,
-                    "account_id": config.account_id,
-                    "assume_role_arn": getattr(config, "assume_role_arn", None),
-                    "session_duration": getattr(config, "session_duration", 3600),
-                },
-                tags=config.tags if config.tags else None,
-            )
-        elif config is not None:
-            # It's a ProviderConfig (backward compatibility)
-            self.region = config.region
-            self.profile = config.credentials.get("profile") if config.credentials else None
-            self.account_id = config.credentials.get("account_id") if config.credentials else None
-            provider_config = config
-        else:
-            # Old-style constructor args
-            self.region = region or "us-east-1"
-            self.profile = profile
-            self.account_id = account_id
-
-            provider_config = ProviderConfig(
-                provider_type="aws",
-                region=self.region,
-                credentials={
-                    "profile": profile,
-                    "account_id": account_id,
-                },
-                tags=kwargs.get("tags"),
+        if config is None:
+            raise TypeError(
+                "AWSProvider requires an AwsConfig. "
+                "Example: AWSProvider(config=AwsConfig(region='us-east-1'))"
             )
 
-        super().__init__(provider_config, **kwargs)
+        if not hasattr(config, "model_dump"):
+            raise TypeError(
+                f"Expected AwsConfig, got {type(config)}. "
+                "Use AwsConfig from glacier.config"
+            )
+
+        # Extract attributes from AwsConfig
+        self.region = config.region
+        self.profile = config.profile
+        self.account_id = config.account_id
+
+        # Convert AwsConfig to ProviderConfig for base class
+        provider_config = ProviderConfig(
+            provider_type="aws",
+            region=config.region,
+            credentials={
+                "profile": config.profile,
+                "account_id": config.account_id,
+                "assume_role_arn": config.assume_role_arn,
+                "session_duration": config.session_duration,
+            },
+            tags=config.tags if config.tags else None,
+        )
+
+        super().__init__(provider_config)
 
     def _load_config_from_env(self, **kwargs) -> ProviderConfig:
-        """Load AWS configuration from environment variables."""
-        region = kwargs.get("region") or os.getenv("AWS_REGION", "us-east-1")
-        profile = kwargs.get("profile") or os.getenv("AWS_PROFILE")
-        account_id = kwargs.get("account_id") or os.getenv("AWS_ACCOUNT_ID")
+        """
+        Load AWS configuration from environment variables.
 
+        This is called by from_env() classmethod.
+        """
+        from glacier.config import AwsConfig
+
+        # Create AwsConfig from environment variables
+        aws_config = AwsConfig(
+            region=os.getenv("AWS_REGION", "us-east-1"),
+            profile=os.getenv("AWS_PROFILE"),
+            account_id=os.getenv("AWS_ACCOUNT_ID"),
+        )
+
+        # Convert to ProviderConfig
         return ProviderConfig(
             provider_type="aws",
-            region=region,
+            region=aws_config.region,
             credentials={
-                "profile": profile,
-                "account_id": account_id,
+                "profile": aws_config.profile,
+                "account_id": aws_config.account_id,
+                "assume_role_arn": aws_config.assume_role_arn,
+                "session_duration": aws_config.session_duration,
             },
-            tags=kwargs.get("tags"),
+            tags=aws_config.tags if aws_config.tags else None,
         )
 
     def _validate_config(self) -> None:
