@@ -15,45 +15,78 @@ class AWSProvider(Provider):
     Terraform for AWS infrastructure.
 
     Example:
-        # Explicit configuration
+        # Simple configuration
         provider = AWSProvider(region="us-east-1")
 
-        # From environment (reads AWS_REGION, AWS_PROFILE, etc.)
+        # With AwsConfig (recommended for environment-first pattern)
+        from glacier.config import AwsConfig
+
+        aws_config = AwsConfig(
+            region="us-east-1",
+            profile="production",
+            tags={"environment": "prod"}
+        )
+        provider = AWSProvider(config=aws_config)
+
+        # From environment
         provider = AWSProvider.from_env()
 
-        # Create a bucket source
-        source = provider.bucket_source(
-            bucket="my-data-bucket",
-            path="data/file.parquet"
-        )
+        # Create environment
+        env = provider.env(name="production")
     """
 
     def __init__(
         self,
-        region: str = "us-east-1",
+        region: str | None = None,
         profile: str | None = None,
         account_id: str | None = None,
-        config: ProviderConfig | None = None,
+        config: Any | None = None,
         **kwargs,
     ):
         """
         Initialize AWS provider.
 
         Args:
-            region: AWS region
+            region: AWS region (optional if config provided)
             profile: AWS profile name (optional)
             account_id: AWS account ID (optional)
-            config: Provider configuration (optional)
+            config: AwsConfig or ProviderConfig instance (optional)
             **kwargs: Additional configuration
         """
-        self.region = region
-        self.profile = profile
-        self.account_id = account_id
+        # Handle new AwsConfig class
+        if config is not None and hasattr(config, "model_dump"):
+            # It's an AwsConfig (Pydantic model)
+            self.region = config.region
+            self.profile = config.profile
+            self.account_id = config.account_id
 
-        if config is None:
-            config = ProviderConfig(
+            # Convert AwsConfig to ProviderConfig for base class
+            provider_config = ProviderConfig(
                 provider_type="aws",
-                region=region,
+                region=config.region,
+                credentials={
+                    "profile": config.profile,
+                    "account_id": config.account_id,
+                    "assume_role_arn": getattr(config, "assume_role_arn", None),
+                    "session_duration": getattr(config, "session_duration", 3600),
+                },
+                tags=config.tags if config.tags else None,
+            )
+        elif config is not None:
+            # It's a ProviderConfig (backward compatibility)
+            self.region = config.region
+            self.profile = config.credentials.get("profile") if config.credentials else None
+            self.account_id = config.credentials.get("account_id") if config.credentials else None
+            provider_config = config
+        else:
+            # Old-style constructor args
+            self.region = region or "us-east-1"
+            self.profile = profile
+            self.account_id = account_id
+
+            provider_config = ProviderConfig(
+                provider_type="aws",
+                region=self.region,
                 credentials={
                     "profile": profile,
                     "account_id": account_id,
@@ -61,7 +94,7 @@ class AWSProvider(Provider):
                 tags=kwargs.get("tags"),
             )
 
-        super().__init__(config, **kwargs)
+        super().__init__(provider_config, **kwargs)
 
     def _load_config_from_env(self, **kwargs) -> ProviderConfig:
         """Load AWS configuration from environment variables."""
