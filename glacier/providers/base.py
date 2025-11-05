@@ -205,40 +205,6 @@ class Provider(ABC):
         """
         pass
 
-    # DEPRECATED: Keep for backward compatibility, but encourage use of bucket()
-    def bucket_source(
-        self,
-        bucket: str,
-        path: str,
-        format: str = "parquet",
-        name: str | None = None,
-        options: dict[str, Any] | None = None,
-    ):
-        """
-        DEPRECATED: Use provider.bucket() instead.
-
-        Create a bucket source for this provider.
-        This method is deprecated in favor of the cloud-agnostic bucket() method.
-
-        Args:
-            bucket: Bucket/container name
-            path: Path within bucket
-            format: Data format (parquet, csv, etc.)
-            name: Optional name for this source
-            options: Additional options
-
-        Returns:
-            Generic Bucket instance
-        """
-        import warnings
-
-        warnings.warn(
-            "bucket_source() is deprecated. Use bucket() instead for cloud-agnostic code.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self.bucket(bucket, path, format, name, None, options)
-
     @abstractmethod
     def get_infrastructure_metadata(self) -> dict[str, Any]:
         """

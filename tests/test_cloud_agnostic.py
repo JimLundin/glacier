@@ -218,20 +218,6 @@ class TestBucketURIs:
         assert "file.parquet" in uri
 
 
-class TestDeprecatedMethods:
-    """Test that deprecated methods still work but issue warnings."""
-
-    def test_bucket_source_deprecated(self):
-        """bucket_source() should work but issue deprecation warning."""
-        provider = AWSProvider(region="us-east-1")
-
-        with pytest.warns(DeprecationWarning, match="Use bucket\\(\\) instead"):
-            bucket = provider.bucket_source("test", path="data.parquet")
-
-        # Should still return a Bucket
-        assert isinstance(bucket, Bucket)
-
-
 class TestProviderSpecificConfigs:
     """Test provider-specific configuration classes."""
 
