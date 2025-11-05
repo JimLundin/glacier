@@ -1,13 +1,16 @@
 """
-S3-based pipeline demonstrating cloud infrastructure generation.
+Cloud-agnostic pipeline demonstrating Glacier's provider abstraction.
 
 This pipeline:
-1. Reads data from multiple S3 sources
+1. Reads data from bucket sources (works with ANY cloud provider!)
 2. Performs transformations
 3. Can generate Terraform infrastructure automatically
 
+The same code works with AWS S3, Azure Blob, GCS, or local filesystem
+by simply changing the provider!
+
 Run with:
-    # Execute locally (requires AWS credentials)
+    # Execute locally (requires cloud credentials)
     glacier run examples/s3_pipeline.py
 
     # Generate infrastructure
@@ -18,34 +21,41 @@ Run with:
 """
 
 from glacier import pipeline, task
-from glacier.sources import S3Source
+from glacier.providers import AWSProvider
+from glacier.resources import Bucket
 import polars as pl
 
-# Define S3 data sources
-sales_data = S3Source(
+# Create a provider - swap this line to change cloud providers!
+# provider = AWSProvider(region="us-east-1")
+# provider = AzureProvider(resource_group="my-rg", location="eastus")
+# provider = GCPProvider(project_id="my-project", region="us-central1")
+# provider = LocalProvider(base_path="./data")
+provider = AWSProvider(region="us-east-1")
+
+# Define cloud-agnostic bucket sources
+# These work with ANY provider - no cloud-specific code!
+sales_data = provider.bucket(
     bucket="my-company-data",
     path="sales/2024/sales.parquet",
-    region="us-east-1",
     name="sales_source",
 )
 
-customer_data = S3Source(
+customer_data = provider.bucket(
     bucket="my-company-data",
     path="customers/customers.parquet",
-    region="us-east-1",
     name="customer_source",
 )
 
 
 @task
-def load_sales(source: S3Source) -> pl.LazyFrame:
-    """Load sales data from S3."""
+def load_sales(source: Bucket) -> pl.LazyFrame:
+    """Load sales data from bucket (cloud-agnostic!)."""
     return source.scan()
 
 
 @task
-def load_customers(source: S3Source) -> pl.LazyFrame:
-    """Load customer data from S3."""
+def load_customers(source: Bucket) -> pl.LazyFrame:
+    """Load customer data from bucket (cloud-agnostic!)."""
     return source.scan()
 
 
@@ -81,8 +91,8 @@ def calculate_customer_metrics(df: pl.LazyFrame) -> pl.LazyFrame:
 
 
 @pipeline(
-    name="s3_customer_analytics",
-    description="Customer analytics pipeline using S3 data sources",
+    name="cloud_agnostic_customer_analytics",
+    description="Cloud-agnostic customer analytics pipeline",
     config={
         "environment": "production",
         "region": "us-east-1",
@@ -93,12 +103,13 @@ def s3_pipeline():
     Main pipeline for customer analytics.
 
     This pipeline demonstrates:
-    - Multiple S3 sources
+    - Cloud-agnostic bucket sources (works with ANY provider!)
     - Complex transformations
     - Joins between datasets
     - Infrastructure-from-code generation
+    - Provider abstraction pattern
     """
-    # Load data from S3
+    # Load data from buckets (cloud-agnostic!)
     sales = load_sales(sales_data)
     customers = load_customers(customer_data)
 
@@ -115,16 +126,22 @@ def s3_pipeline():
 
 if __name__ == "__main__":
     # When you run this pipeline, Glacier can:
-    # 1. Execute it locally (with AWS credentials)
-    # 2. Generate Terraform for S3 buckets and IAM policies
+    # 1. Execute it locally (with cloud credentials)
+    # 2. Generate Terraform for buckets and IAM policies
     # 3. Visualize the DAG
+    # 4. Work with ANY cloud provider by changing one line!
 
-    print("S3 Pipeline Example")
+    print("Cloud-Agnostic Pipeline Example")
     print("=" * 50)
     print("\nThis pipeline demonstrates:")
-    print("- Multiple S3 data sources")
+    print("- Cloud-agnostic bucket sources")
+    print("- Provider abstraction (AWS, Azure, GCP, Local)")
     print("- Complex task dependencies")
     print("- Infrastructure generation from code")
+    print("\nTo switch clouds, just change the provider:")
+    print("  provider = AWSProvider(region='us-east-1')")
+    print("  provider = AzureProvider(resource_group='my-rg')")
+    print("  provider = GCPProvider(project_id='my-project')")
     print("\nTry running:")
     print("  glacier analyze examples/s3_pipeline.py")
     print("  glacier generate examples/s3_pipeline.py")

@@ -90,39 +90,17 @@ class GCPProvider(Provider):
         if not self.project_id:
             raise ValueError("GCP project ID must be specified")
 
-    def bucket_source(
-        self,
-        bucket: str,
-        path: str,
-        format: str = "parquet",
-        name: str | None = None,
-        options: dict[str, Any] | None = None,
-    ):
-        """
-        Create a GCS bucket source.
+    def _create_bucket_adapter(self, bucket):
+        """Create a GCS bucket adapter."""
+        from glacier.adapters.bucket import GCSBucketAdapter
 
-        Args:
-            bucket: GCS bucket name
-            path: Path within bucket
-            format: Data format
-            name: Optional name
-            options: Additional options
+        return GCSBucketAdapter(bucket)
 
-        Returns:
-            GCSSource instance
-        """
-        from glacier.sources.gcs import GCSSource
+    def _create_serverless_adapter(self, serverless):
+        """Create a Cloud Function adapter."""
+        from glacier.adapters.serverless import CloudFunctionAdapter
 
-        return GCSSource(
-            bucket=bucket,
-            path=path,
-            format=format,
-            project_id=self.project_id,
-            region=self.config.region,
-            name=name,
-            options=options,
-            provider=self,
-        )
+        return CloudFunctionAdapter(serverless)
 
     def get_infrastructure_metadata(self) -> dict[str, Any]:
         """Get GCP infrastructure metadata."""
