@@ -234,5 +234,31 @@ class Provider(ABC):
         """
         return cls(config=None, **kwargs)
 
+    def env(self, name: str = "default", **kwargs):
+        """
+        Create a GlacierEnv environment bound to this provider.
+
+        This is a convenience factory method for creating environments
+        from an existing provider instance.
+
+        Args:
+            name: Environment name (e.g., "development", "production")
+            **kwargs: Additional arguments for GlacierEnv
+
+        Returns:
+            GlacierEnv instance with this provider
+
+        Example:
+            provider = AWSProvider(region="us-east-1")
+            env = provider.env(name="production")
+
+            @env.task()
+            def my_task(source):
+                return source.scan()
+        """
+        from glacier.core.env import GlacierEnv
+
+        return GlacierEnv(provider=self, name=name, **kwargs)
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(type='{self.get_provider_type()}', region='{self.config.region}')"

@@ -17,14 +17,27 @@ from glacier.config.serverless import (
     AzureFunctionConfig,
     CloudFunctionConfig,
 )
+from glacier.config.provider import (
+    AwsConfig,
+    GcpConfig,
+    AzureConfig,
+    LocalConfig,
+)
 
 __all__ = [
+    # Bucket configs
     "BucketConfig",
     "S3Config",
     "AzureBlobConfig",
     "GCSConfig",
+    # Serverless configs
     "ServerlessConfig",
     "LambdaConfig",
     "AzureFunctionConfig",
     "CloudFunctionConfig",
+    # Provider configs
+    "AwsConfig",
+    "GcpConfig",
+    "AzureConfig",
+    "LocalConfig",
 ]

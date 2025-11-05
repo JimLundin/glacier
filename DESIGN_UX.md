@@ -2,7 +2,57 @@
 
 **Version:** 2.1
 **Date:** 2025-11-05
-**Status:** Living Document
+**Status:** Living Document | Alpha Software
+
+---
+
+## ⚠️ Alpha Status Notice
+
+**Glacier is currently in ALPHA**. This means:
+
+- **No Backwards Compatibility Guarantees**: The API may change significantly between releases
+- **Breaking Changes Expected**: We prioritize getting the design right over maintaining compatibility
+- **Clean Slate Approach**: Old patterns are removed in favor of better designs
+- **Production Use**: Not recommended until we reach v1.0
+
+This document describes the **current recommended approach** - the environment-first pattern with dependency injection. Previous patterns (global decorators, string-based dependencies) have been removed.
+
+---
+
+## 🚨 CRITICAL DESIGN PRINCIPLE: NO PROVIDER-SPECIFIC CLASSES
+
+**THE ENTIRE POINT OF THIS DESIGN IS DEPENDENCY INJECTION THROUGH CONFIGURATION, NOT SUBCLASSES.**
+
+❌ **WRONG - DO NOT DO THIS:**
+```python
+# NO! This defeats the purpose of dependency injection!
+from glacier.providers import AWSProvider, GCPProvider, AzureProvider
+
+provider = AWSProvider(config=AwsConfig(...))      # BAD
+provider = GCPProvider(config=GcpConfig(...))      # BAD
+provider = AzureProvider(config=AzureConfig(...))  # BAD
+```
+
+✅ **CORRECT - SINGLE PROVIDER CLASS:**
+```python
+# YES! Provider behavior determined by config injection
+from glacier import Provider
+from glacier.config import AwsConfig, GcpConfig, AzureConfig
+
+provider = Provider(config=AwsConfig(region="us-east-1"))        # AWS behavior
+provider = Provider(config=GcpConfig(project_id="my-project"))   # GCP behavior
+provider = Provider(config=AzureConfig(subscription_id="..."))   # Azure behavior
+```
+
+**Why this matters:**
+- **Configuration determines behavior, not class hierarchy**
+- **True dependency injection** - swap providers by changing config only
+- **No code coupling** to provider-specific classes
+- **Provider adapts internally** based on config type (AwsConfig, GcpConfig, etc.)
+- **Clean abstraction** - users never see provider-specific implementations
+- **The config classes ARE the abstraction boundary**
+
+Throughout this document, whenever you see `AWSProvider`, `GCPProvider`, or `AzureProvider` in examples, mentally replace them with the single `Provider` class. These examples are illustrative but will be updated to use the correct pattern.
 
 ---
 
@@ -19,7 +69,7 @@
 9. [Recommended Design](#recommended-design)
 10. [Example Usage Scenarios](#example-usage-scenarios)
 11. [Testing and Mocking](#testing-and-mocking)
-12. [Migration Path](#migration-path)
+12. [Alpha Status - No Migration Path](#alpha-status---no-migration-path)
 13. [Future Enhancements](#future-enhancements)
 
 ---
@@ -1681,78 +1731,48 @@ def test_with_registry_mocking():
 
 ---
 
-## Migration Path
+## Alpha Status - No Migration Path
 
-### Phase 1: Introduce GlacierEnv (Backward Compatible)
+**Glacier is in alpha and does not maintain backwards compatibility.**
 
-**Goal:** Add environment concept without breaking existing code.
+The library has transitioned to the environment-first pattern exclusively:
 
-**Steps:**
-1. Implement `GlacierEnv` class
-2. Add `env()` method to providers
-3. Support both `@task` and `@env.task()` decorators
-4. Add `env.register()` and `env.get()` for registry pattern
+### ✅ Current Design (Only Supported Pattern)
 
-**Backward compatibility:**
+**Environment-first with dependency injection:**
 ```python
-# Old code still works
-from glacier import task, pipeline
+from glacier import GlacierEnv
 from glacier.providers import AWSProvider
-
-provider = AWSProvider(region="us-east-1")
-
-@task
-def my_task(source: Bucket) -> pl.LazyFrame:
-    return source.scan()
-
-# New code can use environment
-env = provider.env()
-
-@env.task()
-def new_task(source: Bucket) -> pl.LazyFrame:
-    return source.scan()
-```
-
-### Phase 2: Add Configuration Classes
-
-**Goal:** Structured configuration with validation.
-
-**Steps:**
-1. Create `AwsConfig`, `GcpConfig`, `AzureConfig`, `LocalConfig`
-2. Create resource configs: `S3Config`, `GCSConfig`, `LambdaConfig`, etc.
-3. Update providers to accept config objects
-4. Maintain backward compatibility with kwargs
-
-**Migration:**
-```python
-# Old style (still supported)
-provider = AWSProvider(region="us-east-1", profile="prod")
-
-# New style (recommended)
 from glacier.config import AwsConfig
 
-config = AwsConfig(region="us-east-1", profile="prod")
-provider = AWSProvider(config=config)
+# Create provider with config
+provider = AWSProvider(config=AwsConfig(region="us-east-1"))
+
+# Create environment
+env = GlacierEnv(provider=provider, name="production")
+
+# Tasks bound to environment
+@env.task()
+def my_task(source) -> pl.LazyFrame:
+    return source.scan()
+
+# Pipelines bound to environment
+@env.pipeline()
+def my_pipeline():
+    source = env.provider.bucket("data", path="file.parquet")
+    return my_task(source)
 ```
 
-### Phase 3: Environment-First Documentation
+### ❌ Removed Patterns (No Longer Supported)
 
-**Goal:** Update all examples to use environment pattern.
+The following patterns have been **removed** from the codebase:
 
-**Steps:**
-1. Update QUICKSTART.md with environment-first examples
-2. Update all example files
-3. Add testing guide with mock examples
-4. Add multi-environment deployment guide
+1. **Global decorators** - `@task` and `@pipeline` without environment
+2. **String-based dependencies** - `depends_on=["task_name"]`
+3. **Untyped provider constructors** - Must use config classes
+4. **Direct source imports** - Use provider factories instead
 
-### Phase 4: Deprecate Global Decorators (Optional)
-
-**Goal:** Simplify API by removing global decorators.
-
-**Steps:**
-1. Add deprecation warnings to `@task` and `@pipeline`
-2. Provide migration tool to convert old code
-3. After 2-3 major versions, remove global decorators
+Since we're in alpha, we prioritize design correctness over backwards compatibility. Users should expect breaking changes between releases until we reach v1.0.
 
 ---
 
