@@ -1,140 +1,199 @@
 """
-Advanced cloud-agnostic pipeline showing provider-specific configuration.
+Advanced cloud-agnostic pipeline with environment-based provider selection.
 
 This example demonstrates:
-1. Using generic Bucket and Serverless resources
-2. Passing provider-specific config when needed
-3. How to write pipelines that work on any cloud platform
+1. Dynamic provider selection based on environment variables
+2. Provider-specific configurations (S3, Azure Blob, GCS)
+3. Complete cloud portability with a single codebase
 4. Best practices for cloud-agnostic design
 
-The key insight: your pipeline code never mentions S3, Azure Blob, or GCS.
-You interact only with generic abstractions: Bucket, Serverless, etc.
+The key insight: Your pipeline code uses the SINGLE Provider class with
+config injection. Switch clouds by changing configuration, not code!
+
+Run with:
+    # AWS
+    export GLACIER_CLOUD_PROVIDER=aws
+    export AWS_REGION=us-east-1
+    python examples/cloud_agnostic_advanced.py
+
+    # Azure
+    export GLACIER_CLOUD_PROVIDER=azure
+    export AZURE_RESOURCE_GROUP=my-rg
+    export AZURE_LOCATION=eastus
+    python examples/cloud_agnostic_advanced.py
+
+    # GCP
+    export GLACIER_CLOUD_PROVIDER=gcp
+    export GCP_PROJECT_ID=my-project
+    export GCP_REGION=us-central1
+    python examples/cloud_agnostic_advanced.py
+
+    # Local
+    export GLACIER_CLOUD_PROVIDER=local
+    python examples/cloud_agnostic_advanced.py
 """
 
-from glacier import pipeline, task
-from glacier.providers import AWSProvider, AzureProvider, GCPProvider
-from glacier.config import S3Config, AzureBlobConfig, GCSConfig
-from glacier.resources import Bucket
+from glacier import GlacierEnv, Provider
+from glacier.config import AwsConfig, AzureConfig, GcpConfig, LocalConfig, S3Config
 import polars as pl
+import os
+
+# ============================================================================
+# 1. CONFIGURATION: Dynamic provider selection from environment
+# ============================================================================
 
 
-# Example 1: Basic cloud-agnostic usage
-# Just change the provider to switch clouds!
-def create_provider_from_env():
+def create_provider_from_env() -> Provider:
     """
-    Create the appropriate provider based on environment.
+    Create provider based on environment variables.
 
-    In a real application, you might:
-    - Read from environment variables
-    - Use a configuration file
-    - Inject via dependency injection
+    This demonstrates the 12-factor app pattern for configuration.
+    The SINGLE Provider class adapts its behavior based on the injected config.
     """
-    import os
-
-    cloud = os.getenv("GLACIER_CLOUD_PROVIDER", "aws")
+    cloud = os.getenv("GLACIER_CLOUD_PROVIDER", "local")
 
     if cloud == "aws":
-        return AWSProvider(region=os.getenv("AWS_REGION", "us-east-1"))
+        config = AwsConfig(
+            region=os.getenv("AWS_REGION", "us-east-1"),
+            profile=os.getenv("AWS_PROFILE", "default"),
+            tags={"environment": "production", "managed_by": "glacier"},
+        )
     elif cloud == "azure":
-        return AzureProvider(
+        config = AzureConfig(
             resource_group=os.getenv("AZURE_RESOURCE_GROUP", "my-rg"),
             location=os.getenv("AZURE_LOCATION", "eastus"),
+            subscription_id=os.getenv("AZURE_SUBSCRIPTION_ID", ""),
+            tags={"environment": "production", "managed_by": "glacier"},
         )
     elif cloud == "gcp":
-        return GCPProvider(
+        config = GcpConfig(
             project_id=os.getenv("GCP_PROJECT_ID", "my-project"),
             region=os.getenv("GCP_REGION", "us-central1"),
+            labels={"environment": "production", "managed_by": "glacier"},
+        )
+    elif cloud == "local":
+        config = LocalConfig(
+            base_path=os.getenv("GLACIER_LOCAL_PATH", "./data"),
+            create_dirs=True,
         )
     else:
-        raise ValueError(f"Unsupported cloud provider: {cloud}")
+        raise ValueError(f"Unsupported cloud provider: {cloud}. Use: aws, azure, gcp, or local")
+
+    # Single Provider class - behavior determined by config!
+    return Provider(config=config)
 
 
-# Initialize provider (cloud-agnostic from here on!)
+# Create provider dynamically
 provider = create_provider_from_env()
 
+# Create environment
+env = GlacierEnv(provider=provider, name="cloud-agnostic")
 
-# Example 2: Basic bucket without provider-specific config
-basic_data = provider.bucket(
-    bucket="my-data-bucket",
-    path="input/data.parquet",
-    name="basic_source",
-)
+# ============================================================================
+# 2. RESOURCES: Define cloud-agnostic resources
+# ============================================================================
 
-
-# Example 3: Bucket with provider-specific configuration
-# Note: The config class matches the provider, but the Bucket is still generic!
-configured_data = provider.bucket(
-    bucket="my-data-bucket",
-    path="optimized/data.parquet",
-    name="configured_source",
-    # This config is only used if provider is AWS
-    # For other providers, it's ignored or adapted
-    config=S3Config(
-        storage_class="INTELLIGENT_TIERING",
-        encryption="AES256",
-        versioning=True,
+# Register basic bucket (works with ANY provider)
+env.register(
+    "basic_data",
+    env.provider.bucket(
+        bucket="my-data-bucket",
+        path="input/data.parquet",
     ),
 )
 
+# Register bucket with provider-specific config
+# Note: S3Config only applies if provider is AWS, ignored otherwise
+env.register(
+    "optimized_data",
+    env.provider.bucket(
+        bucket="my-data-bucket",
+        path="optimized/data.parquet",
+        config=S3Config(
+            storage_class="INTELLIGENT_TIERING",
+            encryption="AES256",
+            versioning=True,
+        ) if isinstance(provider.config, AwsConfig) else None,
+    ),
+)
 
-# Example 4: Cloud-agnostic task functions
-@task
-def load_data(source: Bucket) -> pl.LazyFrame:
+# ============================================================================
+# 3. TASKS: Cloud-agnostic task definitions
+# ============================================================================
+
+
+@env.task()
+def load_data(source) -> pl.LazyFrame:
     """
     Load data from a bucket.
 
     This function works with ANY cloud provider because it uses
-    the generic Bucket abstraction, not cloud-specific sources.
+    the provider abstraction, not cloud-specific APIs.
     """
     return source.scan()
 
 
-@task(depends_on=[load_data])
+@env.task()
 def clean_data(df: pl.LazyFrame) -> pl.LazyFrame:
     """Remove null values and duplicates."""
     return df.filter(pl.col("value").is_not_null()).unique()
 
 
-@task(depends_on=[clean_data])
+@env.task()
 def transform_data(df: pl.LazyFrame) -> pl.LazyFrame:
     """Apply business logic transformations."""
-    return df.with_columns([
-        (pl.col("value") * 1.1).alias("adjusted_value"),
-        pl.col("timestamp").str.to_datetime().alias("datetime"),
-    ])
+    return df.with_columns(
+        [
+            (pl.col("value") * 1.1).alias("adjusted_value"),
+            pl.col("timestamp").cast(pl.Utf8).str.to_datetime().alias("datetime"),
+        ]
+    )
 
 
-@task(depends_on=[transform_data])
+@env.task()
 def aggregate_metrics(df: pl.LazyFrame) -> pl.LazyFrame:
     """Calculate summary metrics."""
-    return df.group_by("category").agg([
-        pl.col("adjusted_value").sum().alias("total_value"),
-        pl.col("adjusted_value").mean().alias("avg_value"),
-        pl.count().alias("record_count"),
-    ])
+    return df.group_by("category").agg(
+        [
+            pl.col("adjusted_value").sum().alias("total_value"),
+            pl.col("adjusted_value").mean().alias("avg_value"),
+            pl.count().alias("record_count"),
+        ]
+    )
 
 
-@pipeline(
-    name="cloud_agnostic_advanced",
-    description="Advanced cloud-agnostic pipeline with provider configs",
-)
+# ============================================================================
+# 4. PIPELINE: Cloud-agnostic pipeline definition
+# ============================================================================
+
+
+@env.pipeline(name="cloud_agnostic_advanced")
 def advanced_pipeline():
     """
-    Pipeline that works on any cloud platform.
+    Pipeline that works on ANY cloud platform.
+
+    This pipeline demonstrates:
+    - Provider abstraction (works with AWS, Azure, GCP, Local)
+    - Environment-based configuration
+    - Optional provider-specific optimizations
+    - Zero code changes to switch clouds
 
     Key benefits:
     - No vendor lock-in
     - Easy to test locally then deploy to any cloud
-    - Can migrate between clouds with minimal code changes
-    - Future-proof for Glacier managed service
+    - Can migrate between clouds by changing environment variables
+    - Single codebase for all deployment targets
     """
-    # Load from basic bucket
-    data1 = load_data(basic_data)
+    # Retrieve registered resources
+    basic_source = env.get("basic_data")
+    optimized_source = env.get("optimized_data")
 
-    # Load from configured bucket
-    data2 = load_data(configured_data)
+    # Load from both sources
+    data1 = load_data(basic_source)
+    data2 = load_data(optimized_source)
 
     # Combine and process
+    # Note: This logic works identically on ALL cloud providers!
     combined = pl.concat([data1, data2])
     cleaned = clean_data(combined)
     transformed = transform_data(cleaned)
@@ -143,22 +202,67 @@ def advanced_pipeline():
     return metrics
 
 
+# ============================================================================
+# 5. EXECUTION
+# ============================================================================
+
 if __name__ == "__main__":
+    print("=" * 70)
     print("Advanced Cloud-Agnostic Pipeline")
-    print("=" * 60)
-    print("\nThis example demonstrates:")
-    print("1. Provider abstraction - works with ANY cloud!")
-    print("2. Optional provider-specific config")
-    print("3. Environment-based provider selection")
-    print("4. Complete cloud portability")
-    print("\nCurrent provider:", provider)
-    print("\nTo switch clouds, set environment variable:")
-    print("  export GLACIER_CLOUD_PROVIDER=aws")
-    print("  export GLACIER_CLOUD_PROVIDER=azure")
-    print("  export GLACIER_CLOUD_PROVIDER=gcp")
-    print("\nThe SAME pipeline code works with ALL providers!")
-    print("\nBenefits:")
-    print("- No vendor lock-in")
-    print("- Easy cloud migration")
-    print("- Test locally, deploy anywhere")
-    print("- Ready for Glacier managed service")
+    print("=" * 70)
+
+    print("\n📍 Current Configuration:")
+    print(f"   Provider: {type(provider.config).__name__}")
+    print(f"   Environment: {env.name}")
+    print(f"   Registered resources: {env.list_resources()}")
+
+    print("\n" + "=" * 70)
+    print("Features")
+    print("=" * 70)
+    print("\n✓ Cloud Portability:")
+    print("  - Same code works on AWS, Azure, GCP, and Local")
+    print("  - Switch clouds by changing environment variables")
+    print("  - No code changes required")
+    print("\n✓ Provider Abstraction:")
+    print("  - Single Provider class with config injection")
+    print("  - Type-safe configuration objects")
+    print("  - Optional provider-specific optimizations")
+    print("\n✓ Environment-First Pattern:")
+    print("  - Explicit configuration management")
+    print("  - Easy to test and mock")
+    print("  - Supports multiple environments (dev, staging, prod)")
+
+    print("\n" + "=" * 70)
+    print("How to Switch Clouds")
+    print("=" * 70)
+    print("\n1. AWS:")
+    print("   export GLACIER_CLOUD_PROVIDER=aws")
+    print("   export AWS_REGION=us-east-1")
+    print("   export AWS_PROFILE=production")
+    print("\n2. Azure:")
+    print("   export GLACIER_CLOUD_PROVIDER=azure")
+    print("   export AZURE_RESOURCE_GROUP=my-rg")
+    print("   export AZURE_LOCATION=eastus")
+    print("\n3. GCP:")
+    print("   export GLACIER_CLOUD_PROVIDER=gcp")
+    print("   export GCP_PROJECT_ID=my-project")
+    print("   export GCP_REGION=us-central1")
+    print("\n4. Local (for testing):")
+    print("   export GLACIER_CLOUD_PROVIDER=local")
+
+    print("\n" + "=" * 70)
+    print("Benefits")
+    print("=" * 70)
+    print("\n✓ No vendor lock-in - switch clouds anytime")
+    print("✓ Test locally, deploy anywhere")
+    print("✓ Single codebase for all clouds")
+    print("✓ Infrastructure generated automatically")
+    print("✓ Type-safe configuration")
+
+    print("\n" + "=" * 70)
+
+    # Uncomment to run (requires appropriate cloud credentials and data)
+    # print("\nRunning pipeline...")
+    # result = advanced_pipeline.run(mode="local")
+    # print("\nPipeline Result:")
+    # print(result.collect())

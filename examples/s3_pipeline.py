@@ -1,83 +1,145 @@
 """
-Cloud-agnostic pipeline demonstrating Glacier's provider abstraction.
+AWS S3 pipeline demonstrating cloud-specific configuration.
 
 This pipeline:
-1. Reads data from bucket sources (works with ANY cloud provider!)
-2. Performs transformations
-3. Can generate Terraform infrastructure automatically
+1. Reads data from S3 buckets with AWS-specific configurations
+2. Performs complex multi-source transformations
+3. Demonstrates joins between datasets
+4. Can generate Terraform infrastructure automatically
 
-The same code works with AWS S3, Azure Blob, GCS, or local filesystem
-by simply changing the provider!
+This example shows the environment-first pattern with:
+- Provider with AwsConfig for cloud-specific settings
+- S3-specific configuration (storage classes, encryption, etc.)
+- Environment registry for shared resources
+- Type-safe pipeline with explicit dependencies
 
 Run with:
-    # Execute locally (requires cloud credentials)
+    # Set AWS credentials first
+    export AWS_PROFILE=your-profile
+    # OR
+    export AWS_ACCESS_KEY_ID=...
+    export AWS_SECRET_ACCESS_KEY=...
+
+    # Execute locally (requires AWS credentials)
+    python examples/s3_pipeline.py
+    # OR
     glacier run examples/s3_pipeline.py
 
-    # Generate infrastructure
+    # Generate Terraform infrastructure
     glacier generate examples/s3_pipeline.py --output ./infra
 
-    # Analyze the pipeline
+    # Analyze the pipeline DAG
     glacier analyze examples/s3_pipeline.py
 """
 
-from glacier import pipeline, task
-from glacier.providers import AWSProvider
-from glacier.resources import Bucket
+from glacier import GlacierEnv, Provider
+from glacier.config import AwsConfig, S3Config
 import polars as pl
 
-# Create a provider - swap this line to change cloud providers!
-# provider = AWSProvider(region="us-east-1")
-# provider = AzureProvider(resource_group="my-rg", location="eastus")
-# provider = GCPProvider(project_id="my-project", region="us-central1")
-# provider = LocalProvider(base_path="./data")
-provider = AWSProvider(region="us-east-1")
+# ============================================================================
+# 1. SETUP: Create environment with AWS provider
+# ============================================================================
 
-# Define cloud-agnostic bucket sources
-# These work with ANY provider - no cloud-specific code!
-sales_data = provider.bucket(
-    bucket="my-company-data",
-    path="sales/2024/sales.parquet",
-    name="sales_source",
+# Create AWS provider configuration
+aws_config = AwsConfig(
+    region="us-east-1",
+    profile="default",  # Or use environment variables
+    tags={
+        "environment": "production",
+        "team": "data-analytics",
+        "managed_by": "glacier",
+    },
 )
 
-customer_data = provider.bucket(
-    bucket="my-company-data",
-    path="customers/customers.parquet",
-    name="customer_source",
+# Create provider with config injection (single Provider class!)
+provider = Provider(config=aws_config)
+
+# Create environment
+env = GlacierEnv(provider=provider, name="production")
+
+# ============================================================================
+# 2. RESOURCES: Register shared S3 buckets with specific configs
+# ============================================================================
+
+# Sales data with intelligent tiering for cost optimization
+env.register(
+    "sales_source",
+    env.provider.bucket(
+        bucket="my-company-data",
+        path="sales/2024/sales.parquet",
+        config=S3Config(
+            storage_class="INTELLIGENT_TIERING",
+            encryption="AES256",
+            versioning=True,
+        ),
+    ),
 )
 
+# Customer data with standard storage
+env.register(
+    "customer_source",
+    env.provider.bucket(
+        bucket="my-company-data",
+        path="customers/customers.parquet",
+        config=S3Config(
+            storage_class="STANDARD",
+            encryption="AES256",
+            versioning=True,
+        ),
+    ),
+)
 
-@task
-def load_sales(source: Bucket) -> pl.LazyFrame:
-    """Load sales data from bucket (cloud-agnostic!)."""
+# Output location for results
+env.register(
+    "output_target",
+    env.provider.bucket(
+        bucket="my-company-analytics",
+        path="customer-metrics/latest.parquet",
+        config=S3Config(
+            storage_class="STANDARD",
+            encryption="AES256",
+        ),
+    ),
+)
+
+# ============================================================================
+# 3. TASKS: Define environment-bound tasks
+# ============================================================================
+
+
+@env.task()
+def load_sales(source) -> pl.LazyFrame:
+    """Load sales data from S3 bucket."""
     return source.scan()
 
 
-@task
-def load_customers(source: Bucket) -> pl.LazyFrame:
-    """Load customer data from bucket (cloud-agnostic!)."""
+@env.task()
+def load_customers(source) -> pl.LazyFrame:
+    """Load customer data from S3 bucket."""
     return source.scan()
 
 
-@task(depends_on=["load_sales"])
+@env.task()
 def filter_recent_sales(df: pl.LazyFrame) -> pl.LazyFrame:
-    """Filter sales from the last 30 days."""
+    """Filter sales from 2024."""
     return df.filter(pl.col("date") >= pl.datetime(2024, 1, 1))
 
 
-@task(depends_on=["load_customers"])
+@env.task()
 def filter_active_customers(df: pl.LazyFrame) -> pl.LazyFrame:
     """Filter to only active customers."""
     return df.filter(pl.col("status") == "active")
 
 
-@task(depends_on=["filter_recent_sales", "filter_active_customers"])
-def join_sales_with_customers(sales: pl.LazyFrame, customers: pl.LazyFrame) -> pl.LazyFrame:
+@env.task()
+def join_sales_with_customers(
+    sales: pl.LazyFrame, customers: pl.LazyFrame
+) -> pl.LazyFrame:
     """Join sales data with customer information."""
     return sales.join(customers, on="customer_id", how="inner")
 
 
-@task(depends_on=["join_sales_with_customers"])
+@env.task()
 def calculate_customer_metrics(df: pl.LazyFrame) -> pl.LazyFrame:
     """Calculate key metrics per customer."""
     return df.group_by("customer_id").agg(
@@ -90,28 +152,39 @@ def calculate_customer_metrics(df: pl.LazyFrame) -> pl.LazyFrame:
     )
 
 
-@pipeline(
-    name="cloud_agnostic_customer_analytics",
-    description="Cloud-agnostic customer analytics pipeline",
-    config={
-        "environment": "production",
-        "region": "us-east-1",
-    },
-)
+@env.task()
+def save_results(df: pl.LazyFrame) -> None:
+    """Save results to S3."""
+    output = env.get("output_target")
+    df.collect().write_parquet(output.get_uri())
+    print(f"✓ Results saved to {output.get_uri()}")
+
+
+# ============================================================================
+# 4. PIPELINE: Wire everything together
+# ============================================================================
+
+
+@env.pipeline(name="customer_analytics")
 def s3_pipeline():
     """
-    Main pipeline for customer analytics.
+    Production customer analytics pipeline on AWS S3.
 
     This pipeline demonstrates:
-    - Cloud-agnostic bucket sources (works with ANY provider!)
-    - Complex transformations
+    - AWS S3-specific configurations (storage classes, encryption, versioning)
+    - Environment registry for resource management
+    - Complex multi-source data processing
     - Joins between datasets
     - Infrastructure-from-code generation
-    - Provider abstraction pattern
+    - Environment-first pattern for testability
     """
-    # Load data from buckets (cloud-agnostic!)
-    sales = load_sales(sales_data)
-    customers = load_customers(customer_data)
+    # Retrieve registered resources
+    sales_source = env.get("sales_source")
+    customer_source = env.get("customer_source")
+
+    # Data flow defines task dependencies
+    sales = load_sales(sales_source)
+    customers = load_customers(customer_source)
 
     # Filter data
     recent_sales = filter_recent_sales(sales)
@@ -121,27 +194,55 @@ def s3_pipeline():
     joined = join_sales_with_customers(recent_sales, active_customers)
     metrics = calculate_customer_metrics(joined)
 
+    # Save results
+    save_results(metrics)
+
     return metrics
 
 
-if __name__ == "__main__":
-    # When you run this pipeline, Glacier can:
-    # 1. Execute it locally (with cloud credentials)
-    # 2. Generate Terraform for buckets and IAM policies
-    # 3. Visualize the DAG
-    # 4. Work with ANY cloud provider by changing one line!
+# ============================================================================
+# 5. EXECUTION
+# ============================================================================
 
-    print("Cloud-Agnostic Pipeline Example")
-    print("=" * 50)
-    print("\nThis pipeline demonstrates:")
-    print("- Cloud-agnostic bucket sources")
-    print("- Provider abstraction (AWS, Azure, GCP, Local)")
-    print("- Complex task dependencies")
-    print("- Infrastructure generation from code")
-    print("\nTo switch clouds, just change the provider:")
-    print("  provider = AWSProvider(region='us-east-1')")
-    print("  provider = AzureProvider(resource_group='my-rg')")
-    print("  provider = GCPProvider(project_id='my-project')")
-    print("\nTry running:")
-    print("  glacier analyze examples/s3_pipeline.py")
-    print("  glacier generate examples/s3_pipeline.py")
+if __name__ == "__main__":
+    print("=" * 70)
+    print("AWS S3 Customer Analytics Pipeline")
+    print("=" * 70)
+    print(f"\nEnvironment: {env.name}")
+    print(f"Provider: AWS ({aws_config.region})")
+    print(f"Registered resources: {env.list_resources()}")
+
+    print("\n" + "=" * 70)
+    print("Pipeline Features")
+    print("=" * 70)
+    print("\n✓ AWS S3-specific configurations:")
+    print("  - Intelligent tiering for cost optimization")
+    print("  - AES256 encryption for security")
+    print("  - Versioning enabled for data lineage")
+    print("\n✓ Environment-first pattern:")
+    print("  - Explicit provider configuration")
+    print("  - Resource registry for shared buckets")
+    print("  - Type-safe task definitions")
+    print("\n✓ Infrastructure as code:")
+    print("  - Generates Terraform automatically")
+    print("  - Includes IAM policies and bucket configs")
+
+    print("\n" + "=" * 70)
+    print("How to Run")
+    print("=" * 70)
+    print("\n1. Set AWS credentials:")
+    print("   export AWS_PROFILE=your-profile")
+    print("\n2. Execute pipeline:")
+    print("   python examples/s3_pipeline.py")
+    print("\n3. Generate infrastructure:")
+    print("   glacier generate examples/s3_pipeline.py --output ./infra")
+    print("\n4. Analyze pipeline:")
+    print("   glacier analyze examples/s3_pipeline.py")
+
+    print("\n" + "=" * 70)
+
+    # Uncomment to actually run the pipeline (requires AWS credentials and data)
+    # print("\nRunning pipeline...")
+    # result = s3_pipeline.run(mode="local")
+    # print("\nPipeline Result:")
+    # print(result.collect())
