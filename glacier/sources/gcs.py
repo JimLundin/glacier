@@ -1,5 +1,5 @@
 """
-S3 source implementation for AWS.
+Google Cloud Storage source implementation.
 """
 
 from typing import Any, TYPE_CHECKING
@@ -11,18 +11,18 @@ if TYPE_CHECKING:
     from glacier.providers.base import Provider
 
 
-class S3Source(BucketSource):
+class GCSSource(BucketSource):
     """
-    Source for reading data from AWS S3 buckets.
+    Source for reading data from Google Cloud Storage.
 
     This source can be introspected at "compile time" to generate:
-    - S3 bucket resources
-    - IAM policies for bucket access
-    - VPC endpoints (if needed)
+    - GCS bucket resources
+    - IAM bindings for bucket access
+    - Service accounts (if needed)
 
-    At runtime, it uses Polars' native S3 support to read data efficiently.
+    At runtime, it uses Polars' GCS support to read data efficiently.
 
-    Note: Typically created via AWSProvider.bucket_source() for cloud-agnostic pipelines.
+    Note: Typically created via GCPProvider.bucket_source() for cloud-agnostic pipelines.
     """
 
     def __init__(
@@ -30,30 +30,31 @@ class S3Source(BucketSource):
         bucket: str,
         path: str,
         format: str = "parquet",
-        region: str = "us-east-1",
+        project_id: str | None = None,
+        region: str = "us-central1",
         name: str | None = None,
         options: dict[str, Any] | None = None,
         provider: "Provider | None" = None,
     ):
         """
-        Initialize an S3 source.
+        Initialize a GCS source.
 
         Args:
-            bucket: S3 bucket name
+            bucket: GCS bucket name
             path: Path within the bucket
             format: Data format (parquet, csv, json, etc.)
-            region: AWS region
+            project_id: GCP project ID
+            region: GCP region
             name: Optional name for this source
             options: Additional options for Polars scan functions
             provider: Provider that created this source
         """
+        self.project_id = project_id
         super().__init__(bucket, path, format, region, name, options, provider)
 
     def scan(self) -> pl.LazyFrame:
         """
-        Scan data from S3 using Polars LazyFrame.
-
-        Returns a lazy evaluation that can be optimized by Polars.
+        Scan data from GCS using Polars LazyFrame.
         """
         uri = self.get_uri()
 
@@ -68,29 +69,30 @@ class S3Source(BucketSource):
             return pl.scan_ipc(uri, **self.options)
         else:
             raise ValueError(
-                f"Unsupported format '{self.format}' for S3Source. "
+                f"Unsupported format '{self.format}' for GCSSource. "
                 f"Supported formats: parquet, csv, ndjson, ipc"
             )
 
     def get_uri(self) -> str:
-        """Return the S3 URI for this source."""
-        return f"s3://{self.bucket}/{self.path}"
+        """Return the GCS URI for this source."""
+        return f"gs://{self.bucket}/{self.path}"
 
     def get_metadata(self) -> SourceMetadata:
         """Return metadata for infrastructure generation."""
         return SourceMetadata(
-            source_type="s3",
-            cloud_provider="aws",
+            source_type="gcs",
+            cloud_provider="gcp",
             region=self.region,
             resource_name=self.bucket,
             additional_config={
                 "path": self.path,
                 "format": self.format,
+                "project_id": self.project_id,
                 "requires_read_access": True,
             },
         )
 
     def get_adapter(self):
-        """Get the S3 storage adapter (for future extensibility)."""
-        # TODO: Implement adapter pattern for custom S3 clients
+        """Get the GCS storage adapter (for future extensibility)."""
+        # TODO: Implement adapter pattern for custom GCS clients
         return None

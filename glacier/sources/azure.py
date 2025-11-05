@@ -1,5 +1,5 @@
 """
-S3 source implementation for AWS.
+Azure Blob Storage source implementation.
 """
 
 from typing import Any, TYPE_CHECKING
@@ -11,49 +11,51 @@ if TYPE_CHECKING:
     from glacier.providers.base import Provider
 
 
-class S3Source(BucketSource):
+class AzureBlobSource(BucketSource):
     """
-    Source for reading data from AWS S3 buckets.
+    Source for reading data from Azure Blob Storage.
 
     This source can be introspected at "compile time" to generate:
-    - S3 bucket resources
-    - IAM policies for bucket access
-    - VPC endpoints (if needed)
+    - Azure Storage Account resources
+    - Blob containers
+    - Role assignments for access
 
-    At runtime, it uses Polars' native S3 support to read data efficiently.
+    At runtime, it uses Polars' Azure support to read data efficiently.
 
-    Note: Typically created via AWSProvider.bucket_source() for cloud-agnostic pipelines.
+    Note: Typically created via AzureProvider.bucket_source() for cloud-agnostic pipelines.
     """
 
     def __init__(
         self,
-        bucket: str,
+        container: str,
         path: str,
         format: str = "parquet",
-        region: str = "us-east-1",
+        storage_account: str | None = None,
+        resource_group: str | None = None,
         name: str | None = None,
         options: dict[str, Any] | None = None,
         provider: "Provider | None" = None,
     ):
         """
-        Initialize an S3 source.
+        Initialize an Azure Blob source.
 
         Args:
-            bucket: S3 bucket name
-            path: Path within the bucket
+            container: Azure Blob container name
+            path: Path within the container
             format: Data format (parquet, csv, json, etc.)
-            region: AWS region
+            storage_account: Azure storage account name
+            resource_group: Azure resource group
             name: Optional name for this source
             options: Additional options for Polars scan functions
             provider: Provider that created this source
         """
-        super().__init__(bucket, path, format, region, name, options, provider)
+        self.storage_account = storage_account
+        self.resource_group = resource_group
+        super().__init__(container, path, format, region=None, name=name, options=options, provider=provider)
 
     def scan(self) -> pl.LazyFrame:
         """
-        Scan data from S3 using Polars LazyFrame.
-
-        Returns a lazy evaluation that can be optimized by Polars.
+        Scan data from Azure Blob Storage using Polars LazyFrame.
         """
         uri = self.get_uri()
 
@@ -68,29 +70,33 @@ class S3Source(BucketSource):
             return pl.scan_ipc(uri, **self.options)
         else:
             raise ValueError(
-                f"Unsupported format '{self.format}' for S3Source. "
+                f"Unsupported format '{self.format}' for AzureBlobSource. "
                 f"Supported formats: parquet, csv, ndjson, ipc"
             )
 
     def get_uri(self) -> str:
-        """Return the S3 URI for this source."""
-        return f"s3://{self.bucket}/{self.path}"
+        """Return the Azure Blob URI for this source."""
+        if self.storage_account:
+            return f"az://{self.bucket}/{self.path}?storage_account={self.storage_account}"
+        return f"az://{self.bucket}/{self.path}"
 
     def get_metadata(self) -> SourceMetadata:
         """Return metadata for infrastructure generation."""
         return SourceMetadata(
-            source_type="s3",
-            cloud_provider="aws",
-            region=self.region,
+            source_type="azure_blob",
+            cloud_provider="azure",
+            region=self.resource_group,
             resource_name=self.bucket,
             additional_config={
                 "path": self.path,
                 "format": self.format,
+                "storage_account": self.storage_account,
+                "resource_group": self.resource_group,
                 "requires_read_access": True,
             },
         )
 
     def get_adapter(self):
-        """Get the S3 storage adapter (for future extensibility)."""
-        # TODO: Implement adapter pattern for custom S3 clients
+        """Get the Azure storage adapter (for future extensibility)."""
+        # TODO: Implement adapter pattern for custom Azure clients
         return None

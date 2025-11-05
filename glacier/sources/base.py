@@ -3,19 +3,22 @@ Base Source abstraction for Glacier.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, TYPE_CHECKING
 from pydantic import BaseModel
 import polars as pl
+
+if TYPE_CHECKING:
+    from glacier.providers.base import Provider
 
 
 class SourceMetadata(BaseModel):
     """Metadata about a source for infrastructure generation."""
 
     source_type: str
-    cloud_provider: Optional[str] = None
-    region: Optional[str] = None
-    resource_name: Optional[str] = None
-    additional_config: Dict[str, Any] = {}
+    cloud_provider: str | None = None
+    region: str | None = None
+    resource_name: str | None = None
+    additional_config: dict[str, Any] = {}
 
     class Config:
         arbitrary_types_allowed = True
@@ -29,11 +32,17 @@ class Source(ABC):
     1. Provide runtime access to data via scan() and read() methods
     2. Expose metadata for infrastructure-from-code generation
     3. Support different storage backends through adapters
+    4. Are created through Provider instances for cloud-agnostic pipelines
     """
 
-    def __init__(self, name: Optional[str] = None):
+    def __init__(
+        self,
+        name: str | None = None,
+        provider: "Provider | None" = None,
+    ):
         self.name = name or self._generate_name()
-        self._metadata: Optional[SourceMetadata] = None
+        self.provider = provider
+        self._metadata: SourceMetadata | None = None
 
     @abstractmethod
     def scan(self) -> pl.LazyFrame:

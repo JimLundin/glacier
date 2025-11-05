@@ -3,8 +3,11 @@ Bucket source abstraction for cloud-agnostic storage.
 """
 
 from abc import abstractmethod
-from typing import Optional, Dict, Any
+from typing import Any, TYPE_CHECKING
 from glacier.sources.base import Source, SourceMetadata
+
+if TYPE_CHECKING:
+    from glacier.providers.base import Provider
 
 
 class BucketSource(Source):
@@ -20,9 +23,10 @@ class BucketSource(Source):
         bucket: str,
         path: str,
         format: str = "parquet",
-        region: Optional[str] = None,
-        name: Optional[str] = None,
-        options: Optional[Dict[str, Any]] = None,
+        region: str | None = None,
+        name: str | None = None,
+        options: dict[str, Any] | None = None,
+        provider: "Provider | None" = None,
     ):
         """
         Initialize a bucket source.
@@ -34,8 +38,9 @@ class BucketSource(Source):
             region: Cloud region (if applicable)
             name: Optional name for this source
             options: Additional options passed to Polars scan functions
+            provider: Provider that created this source
         """
-        super().__init__(name)
+        super().__init__(name, provider)
         self.bucket = bucket
         self.path = path.lstrip("/")  # Normalize path
         self.format = format.lower()

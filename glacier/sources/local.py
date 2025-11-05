@@ -2,11 +2,14 @@
 Local filesystem source implementation.
 """
 
-from typing import Optional, Dict, Any
+from typing import Any, TYPE_CHECKING
 from pathlib import Path
 import polars as pl
 from glacier.sources.bucket import BucketSource
 from glacier.sources.base import SourceMetadata
+
+if TYPE_CHECKING:
+    from glacier.providers.base import Provider
 
 
 class LocalSource(BucketSource):
@@ -19,6 +22,8 @@ class LocalSource(BucketSource):
     3. Data that doesn't need cloud storage
 
     The "bucket" parameter is treated as a base directory path.
+
+    Note: Typically created via LocalProvider.bucket_source() for consistency.
     """
 
     def __init__(
@@ -26,8 +31,9 @@ class LocalSource(BucketSource):
         bucket: str,
         path: str = "",
         format: str = "parquet",
-        name: Optional[str] = None,
-        options: Optional[Dict[str, Any]] = None,
+        name: str | None = None,
+        options: dict[str, Any] | None = None,
+        provider: "Provider | None" = None,
     ):
         """
         Initialize a local source.
@@ -38,8 +44,9 @@ class LocalSource(BucketSource):
             format: Data format (parquet, csv, json, etc.)
             name: Optional name for this source
             options: Additional options for Polars scan functions
+            provider: Provider that created this source
         """
-        super().__init__(bucket, path, format, region=None, name=name, options=options)
+        super().__init__(bucket, path, format, region=None, name=name, options=options, provider=provider)
         self.base_dir = Path(bucket)
 
     def scan(self) -> pl.LazyFrame:
