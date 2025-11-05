@@ -19,6 +19,43 @@ This document describes the **current recommended approach** - the environment-f
 
 ---
 
+## 🚨 CRITICAL DESIGN PRINCIPLE: NO PROVIDER-SPECIFIC CLASSES
+
+**THE ENTIRE POINT OF THIS DESIGN IS DEPENDENCY INJECTION THROUGH CONFIGURATION, NOT SUBCLASSES.**
+
+❌ **WRONG - DO NOT DO THIS:**
+```python
+# NO! This defeats the purpose of dependency injection!
+from glacier.providers import AWSProvider, GCPProvider, AzureProvider
+
+provider = AWSProvider(config=AwsConfig(...))      # BAD
+provider = GCPProvider(config=GcpConfig(...))      # BAD
+provider = AzureProvider(config=AzureConfig(...))  # BAD
+```
+
+✅ **CORRECT - SINGLE PROVIDER CLASS:**
+```python
+# YES! Provider behavior determined by config injection
+from glacier import Provider
+from glacier.config import AwsConfig, GcpConfig, AzureConfig
+
+provider = Provider(config=AwsConfig(region="us-east-1"))        # AWS behavior
+provider = Provider(config=GcpConfig(project_id="my-project"))   # GCP behavior
+provider = Provider(config=AzureConfig(subscription_id="..."))   # Azure behavior
+```
+
+**Why this matters:**
+- **Configuration determines behavior, not class hierarchy**
+- **True dependency injection** - swap providers by changing config only
+- **No code coupling** to provider-specific classes
+- **Provider adapts internally** based on config type (AwsConfig, GcpConfig, etc.)
+- **Clean abstraction** - users never see provider-specific implementations
+- **The config classes ARE the abstraction boundary**
+
+Throughout this document, whenever you see `AWSProvider`, `GCPProvider`, or `AzureProvider` in examples, mentally replace them with the single `Provider` class. These examples are illustrative but will be updated to use the correct pattern.
+
+---
+
 ## Table of Contents
 
 1. [Executive Summary](#executive-summary)

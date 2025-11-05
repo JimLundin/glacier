@@ -34,21 +34,23 @@ See [DESIGN_UX.md](./DESIGN_UX.md) for the full design and [ARCHITECTURE_V2.md](
 
 ### Environment-First Pattern
 
-Glacier uses dependency injection with `GlacierEnv` for better testability, type safety, and multi-environment support:
+Glacier uses dependency injection with `GlacierEnv` for better testability, type safety, and multi-environment support.
+
+**CRITICAL:** Uses a SINGLE `Provider` class - behavior determined by config injection, NOT subclasses!
 
 ```python
-from glacier import GlacierEnv
-from glacier.providers import AWSProvider
+from glacier import GlacierEnv, Provider
 from glacier.config import AwsConfig
 import polars as pl
 
-# 1. Create provider with config
+# 1. Create provider with config injection
+# Provider behavior determined by config - NOT subclasses!
 aws_config = AwsConfig(
     region="us-east-1",
     profile="production",
     tags={"environment": "prod", "team": "data-eng"}
 )
-provider = AWSProvider(config=aws_config)
+provider = Provider(config=aws_config)  # AWS behavior via config
 
 # 2. Create environment
 env = GlacierEnv(provider=provider, name="production")
@@ -95,23 +97,22 @@ if __name__ == "__main__":
 
 ### Cloud-Agnostic Pipeline
 
-Switch clouds by changing the provider config:
+Switch clouds by changing the config - single Provider class adapts its behavior:
 
 ```python
-from glacier import GlacierEnv
-from glacier.providers import AWSProvider, AzureProvider, LocalProvider
+from glacier import GlacierEnv, Provider
 from glacier.config import AwsConfig, AzureConfig, LocalConfig
 
-# Development: Local
-dev_provider = LocalProvider(config=LocalConfig(base_path="./data"))
+# Development: Local behavior via LocalConfig
+dev_provider = Provider(config=LocalConfig(base_path="./data"))
 dev_env = GlacierEnv(provider=dev_provider, name="development")
 
-# Staging: AWS
-staging_provider = AWSProvider(config=AwsConfig(region="us-west-2"))
+# Staging: AWS behavior via AwsConfig
+staging_provider = Provider(config=AwsConfig(region="us-west-2"))
 staging_env = GlacierEnv(provider=staging_provider, name="staging")
 
-# Production: Azure
-prod_provider = AzureProvider(config=AzureConfig(
+# Production: Azure behavior via AzureConfig
+prod_provider = Provider(config=AzureConfig(
     resource_group="prod-rg",
     location="eastus",
     subscription_id="..."
@@ -119,6 +120,7 @@ prod_provider = AzureProvider(config=AzureConfig(
 prod_env = GlacierEnv(provider=prod_provider, name="production")
 
 # Same task logic, different environments!
+# Provider behavior determined by injected config
 @dev_env.task()
 def process_data(source) -> pl.LazyFrame:
     return source.scan()
@@ -129,7 +131,9 @@ def process_data(source) -> pl.LazyFrame:
 Mix different execution backends in one pipeline:
 
 ```python
-env = GlacierEnv(provider=AWSProvider(config=AwsConfig(region="us-east-1")))
+# Provider adapts based on injected AwsConfig
+provider = Provider(config=AwsConfig(region="us-east-1"))
+env = GlacierEnv(provider=provider)
 
 @env.task()
 def load_from_s3(source) -> pl.LazyFrame:
@@ -175,12 +179,11 @@ glacier validate my_pipeline.py
 Register commonly used resources in the environment for easy access:
 
 ```python
-from glacier import GlacierEnv
-from glacier.providers import AWSProvider
+from glacier import GlacierEnv, Provider
 from glacier.config import AwsConfig, S3Config
 
-# Create environment
-provider = AWSProvider(config=AwsConfig(region="us-east-1"))
+# Create environment with unified Provider
+provider = Provider(config=AwsConfig(region="us-east-1"))
 env = GlacierEnv(provider=provider, name="production")
 
 # Register shared resources
@@ -218,28 +221,29 @@ print(env.list_resources())  # ['sales_raw', 'sales_processed', 'customers']
 
 ## Multi-Cloud Support
 
-The environment-first pattern makes multi-cloud deployment simple:
+The environment-first pattern makes multi-cloud deployment simple.
+
+**CRITICAL:** Single Provider class - behavior determined by config!
 
 ```python
-from glacier import GlacierEnv
-from glacier.providers import AWSProvider, AzureProvider, LocalProvider, GCPProvider
+from glacier import GlacierEnv, Provider
 from glacier.config import AwsConfig, AzureConfig, LocalConfig, GcpConfig
 
-# Development: Local
+# Development: Local behavior via LocalConfig
 dev_env = GlacierEnv(
-    provider=LocalProvider(config=LocalConfig(base_path="./data")),
+    provider=Provider(config=LocalConfig(base_path="./data")),
     name="development"
 )
 
-# Staging: AWS
+# Staging: AWS behavior via AwsConfig
 staging_env = GlacierEnv(
-    provider=AWSProvider(config=AwsConfig(region="us-west-2", profile="staging")),
+    provider=Provider(config=AwsConfig(region="us-west-2", profile="staging")),
     name="staging"
 )
 
-# Production: Azure
+# Production: Azure behavior via AzureConfig
 prod_env = GlacierEnv(
-    provider=AzureProvider(config=AzureConfig(
+    provider=Provider(config=AzureConfig(
         resource_group="prod-rg",
         location="eastus",
         subscription_id="..."
@@ -247,9 +251,9 @@ prod_env = GlacierEnv(
     name="production"
 )
 
-# GCP option
+# GCP option: GCP behavior via GcpConfig
 gcp_env = GlacierEnv(
-    provider=GCPProvider(config=GcpConfig(
+    provider=Provider(config=GcpConfig(
         project_id="my-project",
         region="us-central1"
     )),
@@ -275,14 +279,18 @@ prod_task = create_tasks(prod_env)
 Load from environment variables (12-factor app):
 
 ```python
-# Reads AWS_REGION, AWS_PROFILE, etc. from environment
-provider = AWSProvider.from_env()
+# Single Provider.from_env() reads GLACIER_PROVIDER env var
+# then loads appropriate config from environment
+provider = Provider.from_env()
 
-# Reads AZURE_RESOURCE_GROUP, AZURE_LOCATION, etc.
-provider = AzureProvider.from_env()
+# Example with GLACIER_PROVIDER=aws:
+# Reads AWS_REGION, AWS_PROFILE, etc.
 
+# Example with GLACIER_PROVIDER=gcp:
 # Reads GCP_PROJECT_ID, GCP_REGION, etc.
-provider = GCPProvider.from_env()
+
+# Example with GLACIER_PROVIDER=azure:
+# Reads AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, etc.
 ```
 
 ## Infrastructure Generation
@@ -372,12 +380,11 @@ See the [examples](./examples/) directory for:
 The central orchestrator using dependency injection:
 
 ```python
-from glacier import GlacierEnv
-from glacier.providers import AWSProvider
+from glacier import GlacierEnv, Provider
 from glacier.config import AwsConfig
 
 # Create environment with provider
-provider = AWSProvider(config=AwsConfig(region="us-east-1"))
+provider = Provider(config=AwsConfig(region="us-east-1"))
 env = GlacierEnv(provider=provider, name="production")
 
 # Environment manages:
@@ -387,19 +394,27 @@ env = GlacierEnv(provider=provider, name="production")
 # - Pipeline binding (@env.pipeline())
 ```
 
-### Providers
+### Provider
 
-Providers abstract over cloud platforms and require configuration classes:
+Single Provider class that adapts based on injected configuration.
+
+**CRITICAL:** NO provider-specific classes! Config determines behavior!
 
 ```python
-from glacier.providers import AWSProvider, AzureProvider, GCPProvider, LocalProvider
-from glacier.config import AwsConfig
+from glacier import Provider
+from glacier.config import AwsConfig, GcpConfig, AzureConfig
 
-# With config (required)
-provider = AWSProvider(config=AwsConfig(region="us-east-1", profile="prod"))
+# AWS behavior via AwsConfig
+provider = Provider(config=AwsConfig(region="us-east-1", profile="prod"))
 
-# From environment variables
-provider = AWSProvider.from_env()
+# GCP behavior via GcpConfig
+provider = Provider(config=GcpConfig(project_id="my-project"))
+
+# Azure behavior via AzureConfig
+provider = Provider(config=AzureConfig(subscription_id="..."))
+
+# From environment variables (reads GLACIER_PROVIDER env var)
+provider = Provider.from_env()
 
 # Create environment from provider
 env = provider.env(name="production")

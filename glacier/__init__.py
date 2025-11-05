@@ -9,19 +9,19 @@ and environment-first design.
 
 Key concepts:
 - GlacierEnv: Central orchestrator using dependency injection (environment-first pattern)
-- Providers: Factory for creating cloud-agnostic resources
+- Provider: SINGLE class that adapts based on config injection (NO provider subclasses!)
+- Config: Configuration classes (AwsConfig, GcpConfig, etc.) determine provider behavior
 - Resources: Generic abstractions (Bucket, Serverless) that work across clouds
-- Config: Provider-specific configuration classes (AwsConfig, GcpConfig, etc.)
 - Tasks & Pipelines: Environment-bound, composable data transformation units
 
 Environment-First Pattern (Only Supported Pattern):
-    from glacier import GlacierEnv
-    from glacier.providers import AWSProvider
+    from glacier import GlacierEnv, Provider
     from glacier.config import AwsConfig
     import polars as pl
 
-    # 1. Create provider with config
-    provider = AWSProvider(config=AwsConfig(region="us-east-1"))
+    # 1. Create provider with config injection
+    # Config determines behavior - NOT subclasses!
+    provider = Provider(config=AwsConfig(region="us-east-1"))
 
     # 2. Create environment
     env = GlacierEnv(provider=provider, name="production")
@@ -43,9 +43,9 @@ Environment-First Pattern (Only Supported Pattern):
 
 from glacier.core.context import GlacierContext
 from glacier.core.env import GlacierEnv
+from glacier.providers import Provider
 
 # Re-export commonly used modules for convenience
-from glacier import providers
 from glacier import resources
 from glacier import config
 
@@ -54,8 +54,8 @@ __all__ = [
     # Core classes
     "GlacierEnv",
     "GlacierContext",
+    "Provider",
     # Modules
-    "providers",
     "resources",
     "config",
 ]

@@ -4,15 +4,17 @@ Example: Environment-First Pattern with Glacier
 This example demonstrates the recommended environment-first pattern using
 dependency injection and explicit configuration.
 
+CRITICAL: Uses SINGLE Provider class with config injection - NOT provider subclasses!
+
 The environment-first pattern provides:
 - Explicit dependencies (configuration flows through the system)
 - Environment isolation (dev, staging, prod environments coexist)
 - Type safety (full IDE autocomplete and type checking)
 - Testability (easy to inject mock providers)
+- Provider behavior determined by config, NOT subclasses
 """
 
-from glacier import GlacierEnv
-from glacier.providers import AWSProvider, LocalProvider
+from glacier import GlacierEnv, Provider
 from glacier.config import AwsConfig, LocalConfig
 import polars as pl
 
@@ -38,11 +40,12 @@ local_config = LocalConfig(
 )
 
 # ============================================================================
-# 2. PROVIDER: Create providers with config (DI)
+# 2. PROVIDER: Create providers with config injection
 # ============================================================================
+# IMPORTANT: Single Provider class, behavior determined by config!
 
-prod_provider = AWSProvider(config=aws_config)
-dev_provider = LocalProvider(config=local_config)
+prod_provider = Provider(config=aws_config)     # AWS behavior via config
+dev_provider = Provider(config=local_config)     # Local behavior via config
 
 # ============================================================================
 # 3. ENVIRONMENT: Create environments with providers
@@ -195,10 +198,8 @@ def demo_registry_pattern():
     """
     Demonstrate environment registry for shared resources.
     """
-    # Create environment
-    from glacier.config import AwsConfig
-
-    provider = AWSProvider(config=AwsConfig(region="us-east-1"))
+    # Create environment with unified Provider class
+    provider = Provider(config=AwsConfig(region="us-east-1"))
     env = GlacierEnv(provider=provider, name="registry-demo")
 
     # Register shared resources
