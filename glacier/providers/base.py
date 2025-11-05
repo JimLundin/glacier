@@ -74,7 +74,138 @@ class Provider(ABC):
         """Validate that the provider is properly configured."""
         pass
 
+    def bucket(
+        self,
+        bucket: str,
+        path: str,
+        format: str = "parquet",
+        name: str | None = None,
+        config: Any | None = None,
+        options: dict[str, Any] | None = None,
+    ):
+        """
+        Create a cloud-agnostic Bucket resource.
+
+        This is the primary way users interact with bucket storage.
+        Returns a generic Bucket instance that works across all providers.
+
+        Args:
+            bucket: Bucket/container name
+            path: Path within bucket
+            format: Data format (parquet, csv, json, etc.)
+            name: Optional name for this resource
+            config: Optional provider-specific configuration (S3Config, AzureBlobConfig, etc.)
+            options: Additional options passed to scan functions
+
+        Returns:
+            Generic Bucket instance
+
+        Example:
+            # Cloud-agnostic code
+            provider = AWSProvider()  # or any provider
+            bucket = provider.bucket("my-data", path="file.parquet")
+
+            # With provider-specific config
+            from glacier.config import S3Config
+            bucket = provider.bucket(
+                "my-data",
+                path="file.parquet",
+                config=S3Config(versioning=True)
+            )
+        """
+        from glacier.resources.bucket import Bucket
+
+        return Bucket(
+            bucket_name=bucket,
+            path=path,
+            format=format,
+            provider=self,
+            config=config,
+            name=name,
+            options=options,
+        )
+
+    def serverless(
+        self,
+        function_name: str,
+        handler: Any | None = None,
+        runtime: str | None = None,
+        config: Any | None = None,
+        **kwargs,
+    ):
+        """
+        Create a cloud-agnostic Serverless execution environment.
+
+        Returns a generic Serverless instance that works across all providers.
+
+        Args:
+            function_name: Name of the serverless function
+            handler: Handler function or handler path
+            runtime: Runtime environment (python3.11, nodejs18, etc.)
+            config: Optional provider-specific configuration (LambdaConfig, etc.)
+            **kwargs: Additional configuration options
+
+        Returns:
+            Generic Serverless instance
+
+        Example:
+            provider = AWSProvider()
+            func = provider.serverless(
+                "my-function",
+                runtime="python3.11"
+            )
+
+            # With provider-specific config
+            from glacier.config import LambdaConfig
+            func = provider.serverless(
+                "my-function",
+                config=LambdaConfig(memory=1024, timeout=300)
+            )
+        """
+        from glacier.resources.serverless import Serverless
+
+        return Serverless(
+            function_name=function_name,
+            handler=handler,
+            runtime=runtime,
+            provider=self,
+            config=config,
+            **kwargs,
+        )
+
     @abstractmethod
+    def _create_bucket_adapter(self, bucket):
+        """
+        Create a cloud-specific bucket adapter.
+
+        This is called internally by Bucket to get the appropriate adapter.
+        Subclasses must implement this to return the correct adapter type.
+
+        Args:
+            bucket: The Bucket instance needing an adapter
+
+        Returns:
+            BucketAdapter subclass instance
+        """
+        pass
+
+    @abstractmethod
+    def _create_serverless_adapter(self, serverless):
+        """
+        Create a cloud-specific serverless adapter.
+
+        This is called internally by Serverless to get the appropriate adapter.
+        Subclasses must implement this to return the correct adapter type.
+
+        Args:
+            serverless: The Serverless instance needing an adapter
+
+        Returns:
+            ServerlessAdapter subclass instance
+        """
+        pass
+
+    # DEPRECATED: Keep for backward compatibility, but encourage use of bucket()
     def bucket_source(
         self,
         bucket: str,
@@ -84,9 +215,10 @@ class Provider(ABC):
         options: dict[str, Any] | None = None,
     ):
         """
-        Create a bucket source for this provider.
+        DEPRECATED: Use provider.bucket() instead.
 
-        This abstracts over S3, Azure Blob, GCS, etc.
+        Create a bucket source for this provider.
+        This method is deprecated in favor of the cloud-agnostic bucket() method.
 
         Args:
             bucket: Bucket/container name
@@ -96,9 +228,16 @@ class Provider(ABC):
             options: Additional options
 
         Returns:
-            A source appropriate for this provider
+            Generic Bucket instance
         """
-        pass
+        import warnings
+
+        warnings.warn(
+            "bucket_source() is deprecated. Use bucket() instead for cloud-agnostic code.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.bucket(bucket, path, format, name, None, options)
 
     @abstractmethod
     def get_infrastructure_metadata(self) -> dict[str, Any]:

@@ -94,39 +94,17 @@ class AzureProvider(Provider):
         if not self.resource_group:
             raise ValueError("Azure resource group must be specified")
 
-    def bucket_source(
-        self,
-        bucket: str,
-        path: str,
-        format: str = "parquet",
-        name: str | None = None,
-        options: dict[str, Any] | None = None,
-    ):
-        """
-        Create an Azure Blob Storage source.
+    def _create_bucket_adapter(self, bucket):
+        """Create an Azure Blob adapter."""
+        from glacier.adapters.bucket import AzureBlobAdapter
 
-        Args:
-            bucket: Azure container name
-            path: Path within container
-            format: Data format
-            name: Optional name
-            options: Additional options
+        return AzureBlobAdapter(bucket)
 
-        Returns:
-            AzureBlobSource instance
-        """
-        from glacier.sources.azure import AzureBlobSource
+    def _create_serverless_adapter(self, serverless):
+        """Create an Azure Function adapter."""
+        from glacier.adapters.serverless import AzureFunctionAdapter
 
-        return AzureBlobSource(
-            container=bucket,
-            path=path,
-            format=format,
-            storage_account=self.storage_account,
-            resource_group=self.resource_group,
-            name=name,
-            options=options,
-            provider=self,
-        )
+        return AzureFunctionAdapter(serverless)
 
     def get_infrastructure_metadata(self) -> dict[str, Any]:
         """Get Azure infrastructure metadata."""

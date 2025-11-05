@@ -68,39 +68,17 @@ class LocalProvider(Provider):
         # No validation needed for local provider
         pass
 
-    def bucket_source(
-        self,
-        bucket: str,
-        path: str,
-        format: str = "parquet",
-        name: str | None = None,
-        options: dict[str, Any] | None = None,
-    ):
-        """
-        Create a local filesystem source.
+    def _create_bucket_adapter(self, bucket):
+        """Create a local filesystem bucket adapter."""
+        from glacier.adapters.bucket import LocalBucketAdapter
 
-        Args:
-            bucket: Directory name (analogous to bucket)
-            path: Path within directory
-            format: Data format
-            name: Optional name
-            options: Additional options
+        return LocalBucketAdapter(bucket)
 
-        Returns:
-            LocalSource instance
-        """
-        from glacier.sources.local import LocalSource
-
-        # Combine base_path with bucket
-        full_bucket = f"{self.base_path}/{bucket}"
-
-        return LocalSource(
-            bucket=full_bucket,
-            path=path,
-            format=format,
-            name=name,
-            options=options,
-            provider=self,
+    def _create_serverless_adapter(self, serverless):
+        """Create a local serverless adapter (not supported)."""
+        raise NotImplementedError(
+            "Serverless functions are not supported by LocalProvider. "
+            "Use a cloud provider (AWS, Azure, GCP) for serverless execution."
         )
 
     def get_infrastructure_metadata(self) -> dict[str, Any]:

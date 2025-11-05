@@ -84,38 +84,17 @@ class AWSProvider(Provider):
         if not self.config.region:
             raise ValueError("AWS region must be specified")
 
-    def bucket_source(
-        self,
-        bucket: str,
-        path: str,
-        format: str = "parquet",
-        name: str | None = None,
-        options: dict[str, Any] | None = None,
-    ):
-        """
-        Create an S3 bucket source.
+    def _create_bucket_adapter(self, bucket):
+        """Create an S3 bucket adapter."""
+        from glacier.adapters.bucket import S3BucketAdapter
 
-        Args:
-            bucket: S3 bucket name
-            path: Path within bucket
-            format: Data format
-            name: Optional name
-            options: Additional options
+        return S3BucketAdapter(bucket)
 
-        Returns:
-            S3Source instance
-        """
-        from glacier.sources.s3 import S3Source
+    def _create_serverless_adapter(self, serverless):
+        """Create a Lambda adapter."""
+        from glacier.adapters.serverless import LambdaAdapter
 
-        return S3Source(
-            bucket=bucket,
-            path=path,
-            format=format,
-            region=self.config.region,
-            name=name,
-            options=options,
-            provider=self,
-        )
+        return LambdaAdapter(serverless)
 
     def get_infrastructure_metadata(self) -> dict[str, Any]:
         """Get AWS infrastructure metadata."""
