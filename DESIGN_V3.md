@@ -37,23 +37,39 @@ bucket = provider.bucket("my-data", config=S3Config(versioning=True))
 ```
 Provider (single class)
 ├── Config: AwsConfig | AzureConfig | GcpConfig | LocalConfig
-├── Registry Methods: bucket(), serverless(), databricks(), etc.
+├── Registry Methods: bucket(), serverless(), executor()
 └── Resources (created via registry)
     ├── Bucket (single class)
     │   └── Config: S3Config | BlobConfig | GcsConfig
     ├── Serverless (single class)
     │   └── Config: LambdaConfig | AzureFunctionConfig | CloudFunctionConfig
-    └── ExecutionEnvironment (single class)
-        └── Config: DatabricksConfig | GlueConfig | DataprocConfig
+    └── Executor (single class)
+        └── Config: DatabricksConfig | GlueConfig | DataprocConfig | SynapseConfig
 ```
 
 ### Key Design Elements
 
 1. **Single Provider Class**: One `Provider` class that adapts to any cloud via configuration
-2. **Provider as Registry**: `provider.bucket()`, `provider.serverless()` are factory methods
-3. **Resource Polymorphism**: Resources (Bucket, Serverless) are cloud-agnostic
+2. **Provider as Registry**: `provider.bucket()`, `provider.serverless()`, `provider.executor()` are factory methods
+3. **Resource Polymorphism**: Resources (Bucket, Serverless, Executor) are cloud-agnostic
 4. **Config-Based Behavior**: Cloud-specific behavior injected via config objects
 5. **Adapter Pattern**: Internal adapters handle cloud-specific implementation details
+6. **Core Principle**: **Only configs can be platform-specific, never resources**
+
+### The Golden Rule
+
+**"We abstract away the infrastructure with an escape hatch via the config option"**
+
+This means:
+- ✅ `Bucket` (generic) + `S3Config` (specific) = abstraction + escape hatch
+- ✅ `Executor` (generic) + `DatabricksConfig` (specific) = abstraction + escape hatch
+- ❌ `S3Bucket` (specific class) = no abstraction, defeats the purpose
+- ❌ `DatabricksExecutor` (specific class) = no abstraction, defeats the purpose
+
+You get:
+- **Abstraction**: Generic resources work across all platforms
+- **Escape Hatch**: Platform-specific configs when you need them
+- **Best of both worlds**: Cloud-agnostic code with platform-specific optimizations
 
 ## Core Components
 
@@ -163,85 +179,103 @@ class Provider:
         self._resources.append(serverless)
         return serverless
 
-    def databricks(
+    def executor(
         self,
-        cluster_name: str,
-        config: DatabricksConfig | None = None,
-        name: str | None = None,
-    ) -> ExecutionEnvironment:
+        name: str,
+        config: DatabricksConfig | GlueConfig | DataprocConfig | SynapseConfig | None = None,
+        runtime: str | None = None,
+    ) -> Executor:
         """
-        Create a Databricks execution environment.
+        Create an Executor resource.
 
-        Execution environments are resources attached to the provider,
-        just like storage resources.
+        Executors are generic execution environments. The actual platform
+        (Databricks, Glue, Dataproc, etc.) is determined by the config.
+
+        This follows the same pattern as Bucket - one resource type,
+        cloud-specific behavior via config.
 
         Args:
-            cluster_name: Name of the Databricks cluster
-            config: Databricks-specific configuration
+            name: Name of the executor/cluster/job
+            config: Platform-specific configuration (DatabricksConfig, GlueConfig, etc.)
+            runtime: Optional runtime specification
             name: Optional resource name
 
         Returns:
-            ExecutionEnvironment configured for Databricks
+            Executor instance with provider injected
+
+        Examples:
+            # Databricks executor
+            executor = provider.executor(
+                "analytics-cluster",
+                config=DatabricksConfig(instance_type="m5.xlarge", num_workers=4)
+            )
+
+            # AWS Glue executor
+            executor = provider.executor(
+                "etl-job",
+                config=GlueConfig(worker_type="G.1X", num_workers=5)
+            )
+
+            # GCP Dataproc executor
+            executor = provider.executor(
+                "spark-cluster",
+                config=DataprocConfig(machine_type="n1-standard-4")
+            )
         """
-        env = ExecutionEnvironment(
-            environment_type="databricks",
-            environment_name=cluster_name,
+        executor = Executor(
+            name=name,
             provider=self,  # Dependency injection!
             config=config,
-            name=name,
+            runtime=runtime,
         )
-        self._resources.append(env)
-        return env
+        self._resources.append(executor)
+        return executor
 
     def _build_adapter_registry(self) -> dict[type, type]:
         """
         Build the adapter registry based on provider config.
 
         This maps resource types to their cloud-specific adapter classes.
+
+        NOTE: Executor adapters are selected based on the Executor's config,
+        not the Provider's config, since executors can be cross-cloud
+        (e.g., Databricks on AWS or Azure).
         """
         if isinstance(self.config, AwsConfig):
             from glacier.adapters.aws import (
                 S3BucketAdapter,
                 LambdaAdapter,
-                GlueAdapter,
             )
             return {
                 Bucket: S3BucketAdapter,
                 Serverless: LambdaAdapter,
-                ExecutionEnvironment: GlueAdapter,
             }
         elif isinstance(self.config, AzureConfig):
             from glacier.adapters.azure import (
                 BlobStorageAdapter,
                 AzureFunctionAdapter,
-                SynapseAdapter,
             )
             return {
                 Bucket: BlobStorageAdapter,
                 Serverless: AzureFunctionAdapter,
-                ExecutionEnvironment: SynapseAdapter,
             }
         elif isinstance(self.config, GcpConfig):
             from glacier.adapters.gcp import (
                 GcsAdapter,
                 CloudFunctionAdapter,
-                DataprocAdapter,
             )
             return {
                 Bucket: GcsAdapter,
                 Serverless: CloudFunctionAdapter,
-                ExecutionEnvironment: DataprocAdapter,
             }
         else:  # LocalConfig
             from glacier.adapters.local import (
                 LocalBucketAdapter,
                 LocalServerlessAdapter,
-                LocalExecutionAdapter,
             )
             return {
                 Bucket: LocalBucketAdapter,
                 Serverless: LocalServerlessAdapter,
-                ExecutionEnvironment: LocalExecutionAdapter,
             }
 
     def get_adapter(self, resource: Resource) -> Adapter:
@@ -250,12 +284,21 @@ class Provider:
 
         This is called by resources to get their cloud-specific adapter.
 
+        For most resources (Bucket, Serverless), the adapter is determined
+        by the Provider's config. For Executor, the adapter is determined
+        by the Executor's config, allowing cross-cloud executors.
+
         Args:
             resource: The resource needing an adapter
 
         Returns:
             Cloud-specific adapter instance
         """
+        # Special case: Executor adapter is determined by executor config
+        if isinstance(resource, Executor):
+            return self._get_executor_adapter(resource)
+
+        # Standard case: adapter determined by provider config
         resource_type = type(resource)
         adapter_class = self._adapter_registry.get(resource_type)
         if adapter_class is None:
@@ -264,6 +307,38 @@ class Provider:
                 f"with {type(self.config).__name__}"
             )
         return adapter_class(resource, self)
+
+    def _get_executor_adapter(self, executor: Executor) -> Adapter:
+        """
+        Get adapter for an Executor based on its config.
+
+        Executor adapters are determined by the executor's config type,
+        not the provider's config. This allows using Databricks on AWS,
+        Azure, or standalone.
+        """
+        from glacier.config import (
+            DatabricksConfig,
+            GlueConfig,
+            DataprocConfig,
+            SynapseConfig,
+        )
+
+        if isinstance(executor.config, DatabricksConfig):
+            from glacier.adapters.databricks import DatabricksAdapter
+            return DatabricksAdapter(executor, self)
+        elif isinstance(executor.config, GlueConfig):
+            from glacier.adapters.aws import GlueAdapter
+            return GlueAdapter(executor, self)
+        elif isinstance(executor.config, DataprocConfig):
+            from glacier.adapters.gcp import DataprocAdapter
+            return DataprocAdapter(executor, self)
+        elif isinstance(executor.config, SynapseConfig):
+            from glacier.adapters.azure import SynapseAdapter
+            return SynapseAdapter(executor, self)
+        else:
+            # Default to local execution if no config provided
+            from glacier.adapters.local import LocalExecutorAdapter
+            return LocalExecutorAdapter(executor, self)
 
     def get_resources(self) -> list[Resource]:
         """Get all resources created by this provider."""
@@ -550,45 +625,71 @@ class Serverless(Resource):
         return self.function_name
 
 
-class ExecutionEnvironment(Resource):
+class Executor(Resource):
     """
-    Generic execution environment.
+    Generic executor abstraction.
 
-    Execution environments are first-class resources, just like storage.
-    They can be Databricks, AWS Glue, Google Dataproc, Azure Synapse, etc.
+    Executors are first-class resources, just like storage (Bucket) and
+    compute (Serverless). The actual platform (Databricks, Glue, Dataproc,
+    Synapse) is determined by the config, not by the class.
+
+    This follows the core principle: only configs are platform-specific,
+    resources are abstract.
+
+    Examples:
+        # Databricks executor (can run on AWS, Azure, or GCP)
+        executor = provider.executor(
+            "analytics-cluster",
+            config=DatabricksConfig(...)
+        )
+
+        # AWS Glue executor
+        executor = provider.executor(
+            "etl-job",
+            config=GlueConfig(...)
+        )
+
+        # GCP Dataproc executor
+        executor = provider.executor(
+            "spark-cluster",
+            config=DataprocConfig(...)
+        )
     """
 
     def __init__(
         self,
-        environment_type: str,
-        environment_name: str,
+        name: str,
         provider: Provider | None = None,
-        config: DatabricksConfig | GlueConfig | DataprocConfig | None = None,
-        name: str | None = None,
+        config: DatabricksConfig | GlueConfig | DataprocConfig | SynapseConfig | None = None,
+        runtime: str | None = None,
     ):
         """
-        Initialize execution environment.
+        Initialize executor.
 
         Args:
-            environment_type: Type of environment (databricks, glue, dataproc)
-            environment_name: Name of the environment
+            name: Name of the executor/cluster/job
             provider: Provider instance (injected)
-            config: Cloud-specific environment config
-            name: Optional resource name
+            config: Platform-specific executor config
+            runtime: Optional runtime specification
         """
         if provider is None:
             raise ValueError(
-                "ExecutionEnvironment must be created via Provider methods. "
+                "Executor must be created via Provider.executor(). "
                 "Do not instantiate directly."
             )
 
         super().__init__(provider, config, name)
-        self.environment_type = environment_type
-        self.environment_name = environment_name
+        self.runtime = runtime
 
     def submit_job(self, job_definition: dict[str, Any]) -> str:
         """
-        Submit a job to the execution environment.
+        Submit a job to the executor.
+
+        The actual implementation depends on the executor config:
+        - DatabricksConfig: submits to Databricks jobs API
+        - GlueConfig: submits to AWS Glue
+        - DataprocConfig: submits to GCP Dataproc
+        - etc.
 
         Args:
             job_definition: Job configuration
@@ -612,9 +713,21 @@ class ExecutionEnvironment(Resource):
         adapter = self._get_adapter()
         return adapter.get_job_status(job_id)
 
+    def cancel_job(self, job_id: str) -> None:
+        """
+        Cancel a running job.
+
+        Args:
+            job_id: Job identifier
+        """
+        adapter = self._get_adapter()
+        adapter.cancel_job(job_id)
+
     def _generate_name(self) -> str:
         """Generate default name."""
-        return f"{self.environment_type}_{self.environment_name}"
+        # Use the config type to generate a descriptive name
+        config_type = type(self.config).__name__ if self.config else "local"
+        return f"{config_type.lower().replace('config', '')}_{self.name}"
 ```
 
 ### 4. Adapter Pattern
@@ -783,11 +896,11 @@ staging_pipeline = create_pipeline(staging_provider)
 prod_pipeline = create_pipeline(prod_provider)
 ```
 
-### Example 3: Execution Environments as Resources
+### Example 3: Executors as Resources
 
 ```python
 from glacier import Provider
-from glacier.config import AwsConfig, DatabricksConfig
+from glacier.config import AwsConfig, DatabricksConfig, GlueConfig
 
 provider = Provider(config=AwsConfig(region="us-east-1"))
 
@@ -795,38 +908,78 @@ provider = Provider(config=AwsConfig(region="us-east-1"))
 data_source = provider.bucket("raw-data", path="sales.parquet")
 output = provider.bucket("processed-data", path="aggregated.parquet")
 
-# Execution environment resources
-databricks_cluster = provider.databricks(
-    cluster_name="analytics-cluster",
+# Executor resources - note the consistent pattern!
+# Just like Bucket is generic with S3Config, Executor is generic with DatabricksConfig
+
+databricks_executor = provider.executor(
+    name="analytics-cluster",
     config=DatabricksConfig(
         instance_type="m5.xlarge",
         num_workers=4,
+        spark_version="13.3.x-scala2.12",
     ),
 )
 
-glue_job = provider.glue(
-    job_name="etl-job",
+glue_executor = provider.executor(
+    name="etl-job",
     config=GlueConfig(
         worker_type="G.1X",
         num_workers=5,
+        glue_version="4.0",
     ),
 )
 
-# Tasks can specify execution environments
-@task(executor=databricks_cluster)
+# Tasks can specify executors
+@task(executor=databricks_executor)
 def heavy_transform(df: pl.LazyFrame) -> pl.LazyFrame:
     # Runs on Databricks
     return df.with_columns([
         pl.col("revenue").rolling_mean(window_size=7)
     ])
 
-@task(executor=glue_job, depends_on=[heavy_transform])
+@task(executor=glue_executor, depends_on=[heavy_transform])
 def save_results(df: pl.LazyFrame):
     # Runs on AWS Glue
     output.write(df)
 ```
 
-### Example 4: Provider-Specific Config for Optimization
+### Example 4: Cross-Cloud Executors (Databricks)
+
+One powerful aspect of this design: executors like Databricks can run on any cloud!
+
+```python
+from glacier import Provider
+from glacier.config import AwsConfig, AzureConfig, DatabricksConfig
+
+# Databricks on AWS
+aws_provider = Provider(config=AwsConfig(region="us-east-1"))
+databricks_on_aws = aws_provider.executor(
+    name="analytics-cluster",
+    config=DatabricksConfig(
+        instance_type="m5.xlarge",  # AWS instance type
+        num_workers=4,
+    ),
+)
+
+# Same Databricks config, different cloud!
+azure_provider = Provider(config=AzureConfig(
+    resource_group="prod-rg",
+    location="eastus",
+))
+databricks_on_azure = azure_provider.executor(
+    name="analytics-cluster",
+    config=DatabricksConfig(
+        instance_type="Standard_D4s_v3",  # Azure instance type
+        num_workers=4,
+    ),
+)
+
+# The executor config (DatabricksConfig) determines the platform
+# The provider config determines where it runs
+# This separation is powerful!
+```
+
+### Example 5: Provider-Specific Config for Optimization
 
 ```python
 from glacier import Provider
@@ -916,15 +1069,19 @@ cold_storage = provider.bucket(
 - Type-safe: configs are validated by Pydantic
 - Composable: can mix generic and specific configs
 
-### Decision 5: Execution Environments as Resources
+### Decision 5: Executors as Resources with Config-Based Dispatch
 
-**Rationale**: Treating execution environments (Databricks, Glue, etc.) as first-class resources attached to providers maintains consistency.
+**Rationale**: Treating executors (Databricks, Glue, etc.) as first-class resources with config-based adapter selection allows cross-cloud executors.
+
+**Key Insight**: Unlike Bucket and Serverless (where the adapter is determined by the Provider's config), Executor adapters are determined by the Executor's config. This enables Databricks to run on AWS, Azure, or GCP with the same Executor class.
 
 **Benefits**:
 - Consistent API: same pattern as storage resources
+- Cross-cloud executors: Databricks on any cloud
 - Better tracking: can analyze all resources used
 - Infrastructure generation: can generate execution env configs
-- Flexibility: can have multiple execution environments per provider
+- Flexibility: can have multiple executors per provider
+- Separation of concerns: provider config = where, executor config = what
 
 ### Decision 6: Dependency Injection Throughout
 
@@ -998,22 +1155,36 @@ class CloudSqlAdapter(Adapter): ...
 
 4. Register adapters in adapter registry.
 
-### Adding a New Execution Environment
+### Adding a New Executor Config
 
-Same pattern as resources:
+To add support for a new executor platform:
 
 ```python
-def spark_cluster(
-    self,
-    cluster_name: str,
-    config: EmrConfig | DataprocConfig | None = None,
-) -> ExecutionEnvironment:
-    return ExecutionEnvironment(
-        environment_type="spark",
-        environment_name=cluster_name,
-        provider=self,
-        config=config,
-    )
+# 1. Create the config class
+class EmrConfig(BaseModel):
+    """Amazon EMR configuration."""
+    instance_type: str
+    num_instances: int
+    emr_release: str = "emr-6.10.0"
+
+# 2. Create the adapter
+class EmrAdapter(Adapter):
+    """Adapter for Amazon EMR."""
+    def submit_job(self, job_definition: dict) -> str:
+        # EMR-specific job submission
+        pass
+
+    def get_job_status(self, job_id: str) -> str:
+        # EMR-specific status check
+        pass
+
+# 3. Register in Provider._get_executor_adapter()
+# Add to the method:
+elif isinstance(executor.config, EmrConfig):
+    from glacier.adapters.aws import EmrAdapter
+    return EmrAdapter(executor, self)
+
+# That's it! No need to create new resource classes
 ```
 
 ## Comparison with Alternative Approaches
