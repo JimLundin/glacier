@@ -12,10 +12,10 @@ Key concepts:
 - Config: Configuration classes (AwsConfig, GcpConfig, etc.) determine provider behavior
 - Resources: Generic abstractions (Bucket, ExecutionResource) that work across clouds
 - Tasks: Created via @executor.task() decorators on execution resources
-- Pipelines: Orchestrate tasks using @pipeline decorator or fluent API
+- Pipelines: Composed using builder/fluent API pattern
 
-Recommended Pattern (Decorator-based):
-    from glacier import Provider, pipeline
+Builder Pattern (Pipeline Composition):
+    from glacier import Provider, Pipeline
     from glacier.config import AwsConfig
     import polars as pl
 
@@ -27,51 +27,35 @@ Recommended Pattern (Decorator-based):
     lambda_exec = provider.serverless(config=LambdaConfig(memory=1024))
 
     # 3. Create storage resources
-    data_source = provider.bucket(bucket="data", path="input.parquet")
+    raw_data = provider.bucket(bucket="data", path="raw.parquet")
+    filtered_data = provider.bucket(bucket="data", path="filtered.parquet")
+    output_data = provider.bucket(bucket="data", path="output.parquet")
 
     # 4. Define tasks bound to execution resources
     @local_exec.task()
-    def load(source) -> pl.LazyFrame:
-        return source.scan()
+    def filter_positive(df: pl.LazyFrame) -> pl.LazyFrame:
+        return df.filter(pl.col("value") > 0)
 
     @lambda_exec.task()
-    def transform(df: pl.LazyFrame) -> pl.LazyFrame:
-        return df.filter(pl.col("value") > 0)
+    def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
+        return df.group_by("category").agg(pl.col("value").sum())
 
-    # 5. Define pipeline
-    @pipeline(name="etl")
-    def etl_pipeline():
-        data = load(data_source)
-        result = transform(data)
-        return result
-
-    # 6. Execute
-    result = etl_pipeline.run(mode="local")
-
-Alternative Pattern (Fluent API):
-    from glacier import Provider, Pipeline
-
-    provider = Provider(config=AwsConfig(region="us-east-1"))
-    local_exec = provider.local()
-
-    raw = provider.bucket(bucket="data", path="raw.parquet")
-    output = provider.bucket(bucket="data", path="output.parquet")
-
-    @local_exec.task()
-    def process(df: pl.LazyFrame) -> pl.LazyFrame:
-        return df.filter(pl.col("value") > 0)
-
-    # Fluent pipeline composition
+    # 5. Build pipeline using fluent API
     pipeline = (
         Pipeline(name="etl")
-        .source(raw)
-        .transform(process)
-        .to(output)
+        .source(raw_data)
+        .transform(filter_positive)
+        .to(filtered_data)
+        .transform(aggregate)
+        .to(output_data)
     )
+
+    # 6. Generate DAG or execute
+    dag = pipeline.to_dag()
 """
 
 from glacier.core.context import GlacierContext
-from glacier.core.pipeline import Pipeline, pipeline
+from glacier.core.pipeline import Pipeline
 from glacier.providers import Provider
 
 # Re-export commonly used modules for convenience
@@ -86,7 +70,6 @@ __all__ = [
     # Core classes (primary API)
     "Provider",
     "Pipeline",
-    "pipeline",
     # Context
     "GlacierContext",
     # Modules

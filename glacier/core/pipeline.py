@@ -1,5 +1,5 @@
 """
-Pipeline decorator and Pipeline class for Glacier.
+Pipeline class for Glacier using builder/fluent API pattern.
 """
 
 import inspect
@@ -67,69 +67,50 @@ class Pipeline:
     """
     Represents a data pipeline in Glacier.
 
-    Pipelines can be created in two ways:
-    1. Using the fluent API (NEW, PREFERRED):
-       pipeline = (
-           Pipeline(name="etl")
-           .source(raw_data)
-           .transform(clean)
-           .to(output)
-       )
+    Pipelines are created using the builder/fluent API:
 
-    2. Using the decorator pattern (for function-based pipelines):
-       @pipeline(name="etl")
-       def my_pipeline():
-           data = extract(source)
-           return data
+    Example:
+        pipeline = (
+            Pipeline(name="etl")
+            .source(raw_data)
+            .transform(clean)
+            .to(output)
+        )
 
-    The fluent API is recommended for new code as it provides better
-    structure for code generation and infrastructure analysis.
+    The fluent API provides clean, readable pipeline structure that is
+    ideal for code generation and infrastructure analysis.
     """
 
     def __init__(
         self,
-        func: Optional[Callable] = None,
-        name: Optional[str] = None,
+        name: str,
         description: Optional[str] = None,
         config: Optional[Dict[str, Any]] = None,
     ):
         """
-        Initialize a Pipeline.
+        Initialize a Pipeline using the builder pattern.
 
         Args:
-            func: Optional function for decorator-based pipelines
-            name: Pipeline name (required for fluent API)
+            name: Pipeline name (required)
             description: Optional description
             config: Optional configuration
 
-        Example (Fluent API):
-            pipeline = Pipeline(name="etl").source(raw).transform(clean).to(output)
-
-        Example (Decorator):
-            @pipeline(name="etl")
-            def my_pipeline():
-                return process(data)
+        Example:
+            pipeline = (
+                Pipeline(name="etl")
+                .source(raw)
+                .transform(clean)
+                .to(output)
+            )
         """
-        self.func = func
-        self.name = name or (func.__name__ if func else "unnamed_pipeline")
-        self.description = description or (inspect.getdoc(func) if func else None)
+        self.name = name
+        self.description = description
         self.config = config or {}
 
-        # For fluent API
+        # Pipeline composition state
         self._steps: List[TransformStep] = []
         self._current_sources: Optional[Dict[str, "Bucket"]] = None
         self._pending_step: Optional[PendingStep] = None
-
-        # For decorator-based pipelines
-        self.tasks: List["Task"] = []
-        self.sources: List[Any] = []
-        self._analyzed = False
-
-    def __call__(self, *args, **kwargs) -> Any:
-        """Execute the pipeline (for decorator-based pipelines)."""
-        if self.func is None:
-            raise ValueError("Cannot call Pipeline without a function. Use fluent API methods instead.")
-        return self.func(*args, **kwargs)
 
     def source(self, bucket: "Bucket") -> "Pipeline":
         """
@@ -324,70 +305,20 @@ class Pipeline:
 
     def get_metadata(self) -> PipelineMetadata:
         """Get metadata about this pipeline."""
+        # Extract tasks and sources from steps
+        tasks = [step.task for step in self._steps]
+        sources = []
+        for step in self._steps:
+            sources.extend(step.sources.values())
+
         return PipelineMetadata(
             name=self.name,
             description=self.description,
-            tasks=self.tasks,
-            sources=self.sources,
+            tasks=tasks,
+            sources=sources,
             config=self.config,
         )
 
     def __repr__(self) -> str:
-        steps_count = len(self._steps) if self._steps else len(self.tasks)
+        steps_count = len(self._steps)
         return f"Pipeline(name='{self.name}', steps={steps_count})"
-
-
-def pipeline(
-    name: Optional[str] = None,
-    description: Optional[str] = None,
-    config: Optional[Dict[str, Any]] = None,
-) -> Callable:
-    """
-    Global pipeline decorator for creating pipelines from functions.
-
-    This decorator creates a Pipeline object from a function that defines
-    task dependencies and data flow.
-
-    Args:
-        name: Pipeline name (defaults to function name)
-        description: Optional description
-        config: Optional configuration
-
-    Returns:
-        Decorator function
-
-    Example:
-        from glacier import Provider, pipeline
-        import polars as pl
-
-        provider = Provider(config=AwsConfig(region="us-east-1"))
-        local_exec = provider.local()
-        data_source = provider.bucket(bucket="data", path="input.parquet")
-
-        @local_exec.task()
-        def load(source) -> pl.LazyFrame:
-            return source.scan()
-
-        @local_exec.task()
-        def transform(df: pl.LazyFrame) -> pl.LazyFrame:
-            return df.filter(pl.col("value") > 0)
-
-        @pipeline(name="etl")
-        def etl_pipeline():
-            data = load(data_source)
-            result = transform(data)
-            return result
-
-        # Execute
-        result = etl_pipeline.run(mode="local")
-    """
-
-    def decorator(func: Callable) -> Pipeline:
-        return Pipeline(
-            func=func,
-            name=name or func.__name__,
-            description=description,
-            config=config,
-        )
-
-    return decorator

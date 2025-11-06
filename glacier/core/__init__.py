@@ -1,7 +1,7 @@
 """
 Core Glacier functionality.
 
-The global @pipeline decorator is available for creating pipelines from functions.
+Pipelines are created using the builder pattern: Pipeline(name="...").source().transform().to()
 Tasks are created using @executor.task() decorators on execution resources.
 """
 
@@ -10,7 +10,6 @@ from glacier.core.pipeline import (
     Pipeline,
     TransformStep,
     PendingStep,
-    pipeline,
 )
 from glacier.core.context import GlacierContext
 from glacier.core.env import GlacierEnv
@@ -21,7 +20,6 @@ __all__ = [
     "Pipeline",
     "TransformStep",
     "PendingStep",
-    "pipeline",
     "GlacierContext",
     "GlacierEnv",
 ]
