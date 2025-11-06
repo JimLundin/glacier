@@ -173,49 +173,136 @@ class Provider:
             options=options,
         )
 
-    def serverless(
-        self,
-        function_name: str,
-        handler: Any | None = None,
-        runtime: str | None = None,
-        config: Any | None = None,
-        **kwargs,
-    ):
+    def local(self, name: str | None = None, config: Any | None = None):
         """
-        Create a cloud-agnostic Serverless execution environment.
+        Create a local execution resource.
+
+        Returns an execution resource that runs tasks in the local Python process.
 
         Args:
-            function_name: Name of the serverless function
-            handler: Handler function or handler path
-            runtime: Runtime environment (python3.11, nodejs18, etc.)
-            config: Optional resource-specific configuration (LambdaConfig, etc.)
-            **kwargs: Additional configuration options
+            name: Optional name for this execution resource
+            config: Optional configuration
 
         Returns:
-            Generic Serverless instance
+            LocalExecutor instance with .task() decorator
+
+        Example:
+            from glacier import Provider
+            from glacier.config import AwsConfig
+
+            provider = Provider(config=AwsConfig(region="us-east-1"))
+            local_exec = provider.local()
+
+            @local_exec.task()
+            def process_data(source):
+                return source.scan()
+        """
+        from glacier.resources.execution import LocalExecutor
+
+        return LocalExecutor(provider=self, name=name, config=config)
+
+    def serverless(self, name: str | None = None, config: Any | None = None):
+        """
+        Create a serverless execution resource.
+
+        Returns an execution resource that runs tasks in serverless functions.
+        The actual backend (Lambda, Cloud Functions, Azure Functions) is determined
+        by the provider configuration.
+
+        Args:
+            name: Optional name for this execution resource
+            config: Optional resource-specific configuration (LambdaConfig, etc.)
+
+        Returns:
+            ServerlessExecutor instance with .task() decorator
 
         Example:
             from glacier import Provider
             from glacier.config import AwsConfig, LambdaConfig
 
             provider = Provider(config=AwsConfig(region="us-east-1"))
-
-            func = provider.serverless(
-                "my-function",
-                runtime="python3.11",
+            lambda_exec = provider.serverless(
                 config=LambdaConfig(memory=1024, timeout=300)
             )
-        """
-        from glacier.resources.serverless import Serverless
 
-        return Serverless(
-            function_name=function_name,
-            handler=handler,
-            runtime=runtime,
-            provider=self,
-            config=config,
-            **kwargs,
-        )
+            @lambda_exec.task()
+            def transform(df):
+                return df.filter(pl.col("value") > 0)
+        """
+        from glacier.resources.execution import ServerlessExecutor
+
+        return ServerlessExecutor(provider=self, name=name, config=config)
+
+    def cluster(self, name: str | None = None, config: Any | None = None):
+        """
+        Create a cluster execution resource.
+
+        Returns an execution resource that runs tasks on distributed compute clusters.
+        The actual backend (Databricks, EMR, Dataproc, Spark) is determined by
+        the provider configuration and config type.
+
+        Args:
+            name: Optional name for this execution resource
+            config: Optional resource-specific configuration (DatabricksConfig, SparkConfig, etc.)
+
+        Returns:
+            ClusterExecutor instance with .task() decorator
+
+        Example:
+            from glacier import Provider
+            from glacier.config import AwsConfig, DatabricksConfig
+
+            provider = Provider(config=AwsConfig(region="us-east-1"))
+            databricks_exec = provider.cluster(
+                config=DatabricksConfig(
+                    cluster_id="cluster-123",
+                    instance_type="i3.xlarge",
+                    num_workers=4
+                )
+            )
+
+            @databricks_exec.task()
+            def ml_inference(df):
+                return df.with_columns(pl.lit(0.85).alias("prediction"))
+        """
+        from glacier.resources.execution import ClusterExecutor
+
+        return ClusterExecutor(provider=self, name=name, config=config)
+
+    def vm(self, name: str | None = None, config: Any | None = None):
+        """
+        Create a VM execution resource.
+
+        Returns an execution resource that runs tasks on virtual machines.
+        The actual backend (EC2, Compute Engine, Azure VM) is determined by
+        the provider configuration.
+
+        Args:
+            name: Optional name for this execution resource
+            config: Optional resource-specific configuration (EC2Config, etc.)
+
+        Returns:
+            VMExecutor instance with .task() decorator
+
+        Example:
+            from glacier import Provider
+            from glacier.config import AwsConfig, EC2Config
+
+            provider = Provider(config=AwsConfig(region="us-east-1"))
+            ec2_exec = provider.vm(
+                config=EC2Config(
+                    instance_type="t3.large",
+                    ami="ami-12345"
+                )
+            )
+
+            @ec2_exec.task()
+            def batch_process(df):
+                return df.filter(pl.col("value") > 0)
+        """
+        from glacier.resources.execution import VMExecutor
+
+        return VMExecutor(provider=self, name=name, config=config)
 
     def _create_bucket_adapter(self, bucket):
         """

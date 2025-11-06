@@ -5,57 +5,93 @@ Glacier: Code-centric data pipeline library with infrastructure-from-code genera
 
 Glacier provides cloud-agnostic abstractions for building data pipelines that can
 run on any cloud platform (AWS, Azure, GCP) or locally using dependency injection
-and environment-first design.
+and resource-centric design.
 
 Key concepts:
-- GlacierEnv: Central orchestrator using dependency injection (environment-first pattern)
 - Provider: SINGLE class that adapts based on config injection (NO provider subclasses!)
 - Config: Configuration classes (AwsConfig, GcpConfig, etc.) determine provider behavior
-- Resources: Generic abstractions (Bucket, Serverless) that work across clouds
-- Tasks & Pipelines: Environment-bound, composable data transformation units
+- Resources: Generic abstractions (Bucket, ExecutionResource) that work across clouds
+- Tasks: Created via @executor.task() decorators on execution resources
+- Pipelines: Orchestrate tasks using @pipeline decorator or fluent API
 
-Environment-First Pattern (Only Supported Pattern):
-    from glacier import GlacierEnv, Provider
+Recommended Pattern (Decorator-based):
+    from glacier import Provider, pipeline
     from glacier.config import AwsConfig
     import polars as pl
 
     # 1. Create provider with config injection
-    # Config determines behavior - NOT subclasses!
     provider = Provider(config=AwsConfig(region="us-east-1"))
 
-    # 2. Create environment
-    env = GlacierEnv(provider=provider, name="production")
+    # 2. Create execution resources
+    local_exec = provider.local()
+    lambda_exec = provider.serverless(config=LambdaConfig(memory=1024))
 
-    # 3. Define tasks bound to environment
-    @env.task()
-    def process(source) -> pl.LazyFrame:
-        return source.scan().filter(pl.col("value") > 0)
+    # 3. Create storage resources
+    data_source = provider.bucket(bucket="data", path="input.parquet")
 
-    # 4. Define pipeline
-    @env.pipeline()
-    def my_pipeline():
-        data = env.provider.bucket("my-bucket", path="data.parquet")
-        return process(data)
+    # 4. Define tasks bound to execution resources
+    @local_exec.task()
+    def load(source) -> pl.LazyFrame:
+        return source.scan()
 
-    # 5. Execute
-    result = my_pipeline.run(mode="local")
+    @lambda_exec.task()
+    def transform(df: pl.LazyFrame) -> pl.LazyFrame:
+        return df.filter(pl.col("value") > 0)
+
+    # 5. Define pipeline
+    @pipeline(name="etl")
+    def etl_pipeline():
+        data = load(data_source)
+        result = transform(data)
+        return result
+
+    # 6. Execute
+    result = etl_pipeline.run(mode="local")
+
+Alternative Pattern (Fluent API):
+    from glacier import Provider, Pipeline
+
+    provider = Provider(config=AwsConfig(region="us-east-1"))
+    local_exec = provider.local()
+
+    raw = provider.bucket(bucket="data", path="raw.parquet")
+    output = provider.bucket(bucket="data", path="output.parquet")
+
+    @local_exec.task()
+    def process(df: pl.LazyFrame) -> pl.LazyFrame:
+        return df.filter(pl.col("value") > 0)
+
+    # Fluent pipeline composition
+    pipeline = (
+        Pipeline(name="etl")
+        .source(raw)
+        .transform(process)
+        .to(output)
+    )
 """
 
 from glacier.core.context import GlacierContext
-from glacier.core.env import GlacierEnv
+from glacier.core.pipeline import Pipeline, pipeline
 from glacier.providers import Provider
 
 # Re-export commonly used modules for convenience
 from glacier import resources
 from glacier import config
 
+# GlacierEnv is kept for advanced use cases but not in primary API
+from glacier.core.env import GlacierEnv
+
 __version__ = "0.1.0-alpha"
 __all__ = [
-    # Core classes
-    "GlacierEnv",
-    "GlacierContext",
+    # Core classes (primary API)
     "Provider",
+    "Pipeline",
+    "pipeline",
+    # Context
+    "GlacierContext",
     # Modules
     "resources",
     "config",
+    # Advanced (not recommended for most users)
+    "GlacierEnv",
 ]
