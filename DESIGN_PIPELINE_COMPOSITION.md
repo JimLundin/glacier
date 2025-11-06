@@ -11,13 +11,13 @@
 This document defines a **chainable storage** pattern for composing pipelines in Glacier. The key principle: **storage resources (Buckets) are the chainable units, not pipelines**.
 
 **Core Design:**
-- **Storage is the fundamental unit** - Buckets are chainable
-- **No special-cased "source"** - All storage is treated equally
-- **Transforms are operations on storage** - `bucket.transform(task).to(bucket)`
-- **Lineage tracking** - Each bucket knows how it's produced
-- **Bucket with lineage IS the pipeline** - The final bucket IS the pipeline definition for code generation
-- **Single-source: Chain buckets directly** - `raw.transform(task).to(output)`
-- **Multi-source: Use Pipeline** - `Pipeline(s1=bucket1, s2=bucket2).transform(join).to(output)`
+- **Pipeline factory is the starting point** - Always start with `Pipeline(name=..., config=...)`
+- **Sources are added to pipeline** - `.source()` for single, `.sources()` for multi-source
+- **Transforms chain from sources** - `.transform(task)` applies transformations
+- **Output to predefined buckets** - `.to(bucket)` writes and continues chain
+- **Returns Pipeline object** - For DAG generation and infrastructure deployment
+- **No execution in definition script** - Script defines pipeline, deployment runs it
+- **Focus on DX** - Clean, readable pipeline composition for code generation
 
 ---
 
@@ -35,82 +35,88 @@ This document defines a **chainable storage** pattern for composing pipelines in
 
 ## Design Principles
 
-### 1. Storage is the Fundamental Unit
+### 1. Pipeline Factory is the Starting Point
 
-All storage is equal - there's no distinction between "source", "intermediate", and "target":
+All pipelines start with the `Pipeline()` factory function:
 
 ```python
-# All of these are just Bucket objects
+# Define storage buckets
 raw_data = provider.bucket(bucket="data", path="raw.parquet")
 intermediate = provider.bucket(bucket="data", path="intermediate.parquet")
 output = provider.bucket(bucket="data", path="output.parquet")
 
-# Chain them directly - start with any bucket
-pipeline = (
-    raw_data                    # Bucket
-    .transform(extract)         # PendingTransform
-    .to(intermediate)           # Bucket (with lineage)
-    .transform(transform)       # PendingTransform
-    .to(output)                 # Bucket (with lineage)
-)
-
-# Execute
-pipeline.run()
-```
-
-### 2. Buckets Are Chainable
-
-Every bucket can be transformed, creating a chain:
-
-```python
-bucket.transform(task)          # Returns PendingTransform
-pending.to(target_bucket)       # Returns target bucket with lineage
-```
-
-### 3. Lineage Tracking
-
-Each bucket tracks the transformations that produce it:
-
-```python
-# output bucket knows:
-# 1. raw_data → extract → intermediate
-# 2. intermediate → transform → output
-output._lineage = [step1, step2]
-```
-
-### 4. Single-Source vs Multi-Source
-
-For single-source transforms (most common), chain buckets directly. For multi-source transforms (joins, unions), use Pipeline:
-
-```python
-# Single source - chain buckets directly
-pipeline = raw.transform(extract).to(output)
-
-# Multi-source - use Pipeline factory
-pipeline = (
-    Pipeline(sales=sales_bucket, customers=customers_bucket)
-    .transform(join_task)
-    .to(joined_output)
-)
-
-# Pipeline.to() returns a Bucket, so you can continue chaining
-pipeline = (
-    Pipeline(sales=sales_bucket, customers=customers_bucket)
-    .transform(join_task)
-    .to(joined)              # Returns Bucket
-    .transform(aggregate)     # Back to single-source chaining
+# Start with Pipeline factory - NOT from bucket
+my_pipeline = (
+    Pipeline(name="my_etl", config={...})
+    .source(raw_data)
+    .transform(extract)
+    .to(intermediate)
+    .transform(transform)
     .to(output)
 )
+
+# Result is a Pipeline object (for code generation)
+```
+
+### 2. Sources Are Added to Pipeline
+
+Use `.source()` for single source or `.sources()` for multiple sources:
+
+```python
+# Single source
+pipeline = Pipeline(name="cleaning").source(raw_data)
+
+# Multiple sources (for joins)
+pipeline = Pipeline(name="join").sources(
+    sales_df=raw_sales,
+    customers_df=raw_customers
+)
+```
+
+### 3. Transforms Chain from Sources
+
+Apply transformations using `.transform()`:
+
+```python
+pipeline = (
+    Pipeline(name="etl")
+    .source(raw_data)
+    .transform(clean_data)      # Apply transformation
+    .to(cleaned)                # Write to bucket
+    .transform(aggregate)       # Apply next transformation (reads from cleaned)
+    .to(output)                 # Write to final bucket
+)
+```
+
+### 4. No Execution in Definition Script
+
+The script **only defines** the pipeline structure. It does NOT execute the pipeline:
+
+```python
+# This script defines the pipeline (NO EXECUTION)
+my_pipeline = (
+    Pipeline(name="daily_etl")
+    .source(raw_data)
+    .transform(process_data)
+    .to(output)
+)
+
+# The Pipeline object is captured for:
+# - DAG generation
+# - Infrastructure code generation (Terraform, etc.)
+# - Deployment to cloud infrastructure
+
+# NO .run() method - execution happens in deployed infrastructure
 ```
 
 ---
 
 ## Core Pattern
 
-### Complete Example
+### Single-Source Pipeline
 
 ```python
-from glacier import Provider
+from glacier import Provider, Pipeline
 from glacier.config import AwsConfig, LambdaConfig
 import polars as pl
 
@@ -119,7 +125,7 @@ provider = Provider(config=AwsConfig(region="us-east-1"))
 local_exec = provider.local()
 lambda_exec = provider.serverless(config=LambdaConfig(memory=1024))
 
-# 2. Define storage resources (all equal - no special "source")
+# 2. Define storage resources
 raw_data = provider.bucket(bucket="data-lake", path="raw/data.parquet")
 intermediate = provider.bucket(bucket="data-lake", path="intermediate/step1.parquet")
 output = provider.bucket(bucket="data-lake", path="output/result.parquet")
@@ -135,33 +141,26 @@ def transform(df: pl.LazyFrame) -> pl.LazyFrame:
     """Transform data."""
     return df.with_columns((pl.col("value") * 2).alias("doubled"))
 
-# 4. Build pipeline: chain storage directly
-pipeline = (
-    raw_data                    # Start with any bucket
+# 4. Build pipeline: START WITH Pipeline() factory
+etl_pipeline = (
+    Pipeline(name="etl_pipeline", description="Extract, transform, load")
+    .source(raw_data)           # Add source
     .transform(extract)         # Apply transformation
-    .to(intermediate)           # Write to storage (explicit)
-    .transform(transform)       # Apply transformation
-    .to(output)                 # Write to storage (explicit)
+    .to(intermediate)           # Write to bucket
+    .transform(transform)       # Apply transformation (reads from intermediate)
+    .to(output)                 # Write to final bucket
 )
 
-# 5. Execute - pipeline is just a bucket with lineage
-result = pipeline.run(mode="local")
-
-# Can also name it for clarity
-pipeline = (
-    raw_data
-    .transform(extract)
-    .to(intermediate)
-    .transform(transform)
-    .to(output)
-    .with_name("etl_pipeline")  # Optional: add metadata
-)
+# etl_pipeline is a Pipeline object containing the complete definition
+# It will be captured for code generation (Terraform, etc.)
+# NO .run() - execution happens in deployed infrastructure
 ```
 
-### Multi-Source Example (Joins)
+### Multi-Source Pipeline (Joins)
 
 ```python
 from glacier import Provider, Pipeline
+from glacier.config import SparkConfig
 import polars as pl
 
 # 1. Setup
@@ -170,15 +169,20 @@ local_exec = provider.local()
 spark_exec = provider.spark(config=SparkConfig(workers=3))
 
 # 2. Define storage
-sales = provider.bucket(bucket="data", path="sales.parquet")
-customers = provider.bucket(bucket="data", path="customers.parquet")
-joined = provider.bucket(bucket="data", path="joined.parquet")
-output = provider.bucket(bucket="data", path="output.parquet")
+raw_sales = provider.bucket(bucket="data", path="raw/sales.parquet")
+raw_customers = provider.bucket(bucket="data", path="raw/customers.parquet")
+joined = provider.bucket(bucket="data", path="processed/joined.parquet")
+output = provider.bucket(bucket="data", path="output/summary.parquet")
 
 # 3. Define multi-source task
 @spark_exec.task()
 def join_data(sales_df: pl.LazyFrame, customers_df: pl.LazyFrame) -> pl.LazyFrame:
-    """Join sales with customer data."""
+    """
+    Join sales with customer data.
+
+    Note: Parameter names (sales_df, customers_df) must match the kwargs
+    used in .sources(sales_df=..., customers_df=...)
+    """
     return sales_df.join(customers_df, on="customer_id", how="left")
 
 @local_exec.task()
@@ -187,71 +191,65 @@ def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
     return df.group_by("region").agg(pl.col("revenue").sum())
 
 # 4. Build pipeline: multi-source → single-source chaining
-pipeline = (
-    Pipeline(sales_df=sales, customers_df=customers)  # Multi-source start
-    .transform(join_data)                              # Uses both sources
-    .to(joined)                                        # Returns Bucket
-    .transform(aggregate)                              # Single-source (reads joined)
-    .to(output)                                        # Returns Bucket
+join_pipeline = (
+    Pipeline(name="sales_join_pipeline")
+    .sources(sales_df=raw_sales, customers_df=raw_customers)  # Multi-source
+    .transform(join_data)                                      # Uses both sources
+    .to(joined)                                                # Write to bucket
+    .transform(aggregate)                                      # Single-source (reads joined)
+    .to(output)                                                # Write to final bucket
 )
 
-# 5. Execute
-result = pipeline.run(mode="cloud")
+# join_pipeline is a Pipeline object for code generation
 ```
 
 ### Key Points
 
-1. **Single source** - Chain buckets directly: `bucket.transform(task).to(bucket)`
-2. **Multi-source** - Use Pipeline: `Pipeline(src1=b1, src2=b2).transform(task).to(bucket)`
-3. **`.transform(task)`** - Creates a PendingTransform (needs a target)
-4. **`.to(bucket)`** - Materializes to storage, returns that bucket (chainable!)
-5. **Mixing patterns** - Pipeline.to() returns Bucket, so you can continue chaining
-6. **Lineage** - Final bucket tracks all transforms that produced it
-7. **Execute** - Call `.run()` on the final bucket to execute the lineage
+1. **Always start with Pipeline()** - Factory function with name and optional config
+2. **Single source** - `.source(bucket)` for one input
+3. **Multi-source** - `.sources(name1=bucket1, name2=bucket2)` for joins
+4. **`.transform(task)`** - Apply transformation
+5. **`.to(bucket)`** - Write to bucket and continue chain (next transform reads from this bucket)
+6. **Returns Pipeline object** - For DAG/infrastructure generation
+7. **No execution** - Script only defines structure, deployment runs it
 
 ---
 
 ## Pipeline Definition Capture
 
-### The Bucket IS the Pipeline
+### The Pipeline Object IS the Definition
 
-A key insight: **the final Bucket with lineage IS the pipeline definition**. This is captured for code generation.
+The `Pipeline` object you build contains the complete pipeline definition for code generation:
 
 ```python
-# Define your pipeline using chainable buckets
+# Define your pipeline
 etl_pipeline = (
-    raw_data
+    Pipeline(name="etl_pipeline")
+    .source(raw_data)
     .transform(extract)
     .to(intermediate)
     .transform(transform)
     .to(output)
-    .with_name("etl_pipeline")  # Optional: add metadata
 )
 
-# etl_pipeline is a Bucket, but it contains the complete pipeline definition
-print(etl_pipeline._lineage)  # List of TransformSteps
+# etl_pipeline is a Pipeline object containing:
+# - Name: "etl_pipeline"
+# - All transform steps: source → transform → target
+# - Complete DAG structure
+# - Ready for code generation
 
-# Use for execution
-etl_pipeline.run(mode="local")
-
-# Use for code generation (Terraform, etc.)
-etl_pipeline.run(mode="generate", output_dir="./infrastructure")
-
-# Use for analysis
-analysis = etl_pipeline.run(mode="analyze")
-print(analysis.estimated_cost())
-
-# Visualize
-print(etl_pipeline.visualize())
+print(etl_pipeline.name)        # "etl_pipeline"
+print(etl_pipeline.steps)       # List of TransformSteps
 ```
 
-### Why This Works for Code Generation
+### How Code Generation Works
 
-When you write:
+When you write a pipeline definition file:
 
 ```python
 # pipelines.py
-from glacier import Provider
+from glacier import Provider, Pipeline
+import polars as pl
 
 provider = Provider(...)
 local_exec = provider.local()
@@ -262,23 +260,24 @@ output = provider.bucket("data", "output.parquet")
 
 # Define task
 @local_exec.task()
-def process(df): ...
+def process(df: pl.LazyFrame) -> pl.LazyFrame:
+    return df.filter(pl.col("value") > 0)
 
-# Define pipeline
+# Define pipeline - THIS IS CAPTURED
 my_pipeline = (
-    raw
+    Pipeline(name="my_pipeline")
+    .source(raw)
     .transform(process)
     .to(output)
-    .with_name("my_pipeline")
 )
 ```
 
-The code generator can:
+The code generator:
 
-1. **Execute the Python file** - Run `pipelines.py` to instantiate the objects
-2. **Find pipelines** - Scan module for Buckets with lineage (e.g., `hasattr(obj, '_lineage') and len(obj._lineage) > 0`)
-3. **Extract definition** - Read the lineage to get all TransformSteps
-4. **Generate infrastructure** - Convert to Terraform, CloudFormation, etc.
+1. **Executes the Python file** - Run `pipelines.py` to instantiate objects
+2. **Finds Pipeline objects** - Scan module for `Pipeline` instances
+3. **Extracts definition** - Read the steps from each pipeline
+4. **Generates infrastructure** - Convert to Terraform, CloudFormation, etc.
 
 ```python
 # Code generator (simplified)
@@ -292,78 +291,87 @@ spec.loader.exec_module(module)
 # Find all pipeline definitions
 pipelines = []
 for name, obj in vars(module).items():
-    if hasattr(obj, '_lineage') and obj._lineage:
+    if isinstance(obj, Pipeline):
         # This is a pipeline!
         pipelines.append((name, obj))
 
 # Generate infrastructure for each pipeline
 for name, pipeline in pipelines:
-    print(f"Generating infrastructure for: {name}")
-    pipeline.run(mode="generate", output_dir=f"./terraform/{name}")
+    print(f"Generating infrastructure for: {pipeline.name}")
+    generator = TerraformGenerator(pipeline)
+    generator.generate(output_dir=f"./terraform/{pipeline.name}")
 ```
 
-### Naming Pipelines
+### Example: Multiple Pipelines
 
-Use `.with_name()` to add metadata for better identification:
+You can define multiple pipelines in one file:
 
 ```python
-# Unnamed - uses bucket path as default
-pipeline = raw.transform(process).to(output)
+# pipelines.py
 
-# Named - explicit pipeline name
-pipeline = (
-    raw
-    .transform(process)
+# Pipeline 1: Data cleaning
+cleaning_pipeline = (
+    Pipeline(name="data_cleaning")
+    .source(raw_data)
+    .transform(clean_data)
+    .to(cleaned_data)
+)
+
+# Pipeline 2: Analytics
+analytics_pipeline = (
+    Pipeline(name="daily_analytics")
+    .sources(sales=sales_data, customers=customer_data)
+    .transform(join_and_aggregate)
+    .to(analytics_output)
+)
+
+# Pipeline 3: Reporting
+reporting_pipeline = (
+    Pipeline(name="weekly_report")
+    .source(analytics_output)  # Uses output from analytics_pipeline
+    .transform(generate_report)
+    .to(report_output)
+)
+
+# Code generator will find all three pipelines
+```
+
+### No Execution in Definition Script
+
+Important: The definition script does **not** execute pipelines:
+
+```python
+# pipelines.py
+
+# This DEFINES the pipeline (no execution)
+my_pipeline = (
+    Pipeline(name="etl")
+    .source(raw_data)
+    .transform(process_data)
     .to(output)
-    .with_name("my_etl", "Daily ETL process")
 )
 
-# Access metadata
-print(pipeline._metadata["name"])  # "my_etl"
-```
+# Pipeline object is used for:
+# ✓ Code generation (Terraform, CloudFormation)
+# ✓ DAG visualization
+# ✓ Infrastructure deployment
 
-### Multi-Source Pipelines
+# Pipeline execution happens:
+# ✓ In deployed cloud infrastructure (Lambda, Airflow, etc.)
+# ✓ Via orchestration tools
+# ✓ On schedule or trigger
 
-Multi-source pipelines also return Buckets with lineage:
-
-```python
-# Multi-source pipeline
-join_pipeline = (
-    Pipeline(sales=sales, customers=customers)
-    .transform(join_task)
-    .to(joined)
-    .with_name("sales_join")
-)
-
-# join_pipeline is a Bucket with MultiSourceTransformStep in lineage
-join_pipeline.run(mode="generate")
-```
-
-### Pipeline as First-Class Objects
-
-While buckets with lineage are the pipeline definitions, you can also work with explicit Pipeline objects:
-
-```python
-# Bucket-based (recommended)
-pipeline_bucket = raw.transform(process).to(output).with_name("etl")
-
-# Convert to explicit Pipeline object if needed
-pipeline_obj = pipeline_bucket.to_pipeline()
-print(type(pipeline_obj))  # Pipeline
-
-# Both work the same for execution/generation
-pipeline_bucket.run(mode="generate")
-pipeline_obj.run(mode="generate")
+# NO .run() in definition script - that's for deployed infrastructure
 ```
 
 ---
 
-## Chainable Storage API
+## Pipeline Builder API
 
-### Bucket Class
+### Pipeline Class
 
 ```python
-class Bucket:
+class Pipeline:
     """
     Storage resource for reading/writing data.
 
