@@ -4,9 +4,12 @@ Task decorator and Task class for Glacier pipelines.
 
 import inspect
 from functools import wraps
-from typing import Callable, Any, get_type_hints
+from typing import Callable, Any, get_type_hints, TYPE_CHECKING
 from dataclasses import dataclass, field
 import polars as pl
+
+if TYPE_CHECKING:
+    from glacier.resources.execution import ExecutionResource
 
 
 @dataclass
@@ -16,7 +19,7 @@ class TaskMetadata:
     name: str
     func: Callable
     depends_on: list["Task"] = field(default_factory=list)
-    executor: str | None = None
+    executor: "ExecutionResource | str | None" = None
     description: str | None = None
     inputs: dict = field(default_factory=dict)
     outputs: dict = field(default_factory=dict)
@@ -30,10 +33,16 @@ class Task:
     on data. They can depend on other tasks and can be analyzed at compile
     time to understand infrastructure requirements.
 
-    Tasks now support:
-    - Explicit dependencies (pass Task objects, not strings)
-    - Executor specification (local, databricks, dbt, etc.)
-    - Type-safe composition
+    Tasks are created by the @executor.task() decorator and are bound to
+    execution resources (not strings).
+
+    Example:
+        provider = Provider(config=AwsConfig(region="us-east-1"))
+        local_exec = provider.local()
+
+        @local_exec.task()
+        def process_data(df: pl.LazyFrame) -> pl.LazyFrame:
+            return df.filter(pl.col("value") > 0)
     """
 
     def __init__(
@@ -41,7 +50,8 @@ class Task:
         func: Callable,
         name: str | None = None,
         depends_on: list["Task"] | None = None,
-        executor: str | None = None,
+        executor: "ExecutionResource | str | None" = None,
+        **config: Any,
     ):
         """
         Initialize a Task.
@@ -50,12 +60,14 @@ class Task:
             func: The function to wrap
             name: Optional task name (defaults to function name)
             depends_on: List of Task objects this task depends on (NOT strings)
-            executor: Execution backend (local, databricks, dbt, spark, etc.)
+            executor: Execution resource object (preferred) or string (legacy)
+            **config: Additional task configuration
         """
         self.func = func
         self.name = name or func.__name__
         self.depends_on = depends_on or []
-        self.executor = executor or "local"
+        self.executor = executor
+        self.config = config
 
         # Store the original function signature for introspection
         self.signature = inspect.signature(func)
@@ -74,6 +86,20 @@ class Task:
             inputs=self._type_hints,
             outputs=self._type_hints.get("return", Any),
         )
+
+    def get_executor_type(self) -> str:
+        """
+        Get the executor type string.
+
+        Returns:
+            Executor type string ("local", "serverless", "cluster", "vm")
+        """
+        if isinstance(self.executor, str):
+            return self.executor
+        elif hasattr(self.executor, "get_executor_type"):
+            return self.executor.get_executor_type()
+        else:
+            return "local"
 
     def __call__(self, *args, **kwargs) -> Any:
         """Execute the task function."""
@@ -105,16 +131,84 @@ class Task:
 
     def __repr__(self) -> str:
         deps = [t.name for t in self.depends_on]
-        return f"Task(name='{self.name}', executor='{self.executor}', depends_on={deps})"
+        executor_type = self.get_executor_type()
+        return f"Task(name='{self.name}', executor='{executor_type}', depends_on={deps})"
+
+
+class TaskInstance:
+    """
+    Executable instance of a task.
+
+    Represents: sources → transform → target
+
+    This is created from TransformStep in the fluent pipeline API.
+    """
+
+    def __init__(
+        self,
+        task: Task,
+        sources: dict[str, Any],
+        target: Any,
+        name: str,
+    ):
+        """
+        Initialize a TaskInstance.
+
+        Args:
+            task: Task to execute
+            sources: Dictionary mapping parameter names to Bucket sources
+            target: Target Bucket to write to
+            name: Instance name
+        """
+        self.task = task
+        self.sources = sources
+        self.target = target
+        self.name = name
+        self.dependencies: list["TaskInstance"] = []
+
+    def execute(self, context: Any = None) -> Any:
+        """
+        Execute this task instance.
+
+        Steps:
+        1. Read from source(s)
+        2. Execute task function
+        3. Write to target
+
+        Args:
+            context: Optional execution context
+
+        Returns:
+            Result of the task execution
+        """
+        # Load all sources as LazyFrames
+        source_dfs = {
+            name: bucket.scan() for name, bucket in self.sources.items()
+        }
+
+        # Call task with named arguments
+        result = self.task.func(**source_dfs)
+
+        # Write to target
+        if result is not None and hasattr(result, "collect"):
+            result.collect().write_parquet(self.target.get_uri())
+
+        return result
+
+    def __repr__(self) -> str:
+        return f"TaskInstance(name='{self.name}', task='{self.task.name}')"
 
 
 # Global task decorator has been removed.
-# Use environment-bound tasks instead: @env.task()
+# Use execution resource-bound tasks instead: @executor.task()
 #
 # Example:
-#   from glacier import GlacierEnv
-#   env = GlacierEnv(provider=provider, name="production")
+#   from glacier import Provider
+#   from glacier.config import AwsConfig
 #
-#   @env.task()
+#   provider = Provider(config=AwsConfig(region="us-east-1"))
+#   local_exec = provider.local()
+#
+#   @local_exec.task()
 #   def my_task(source) -> pl.LazyFrame:
 #       return source.scan()
