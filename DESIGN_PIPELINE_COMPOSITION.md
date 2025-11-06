@@ -1,6 +1,6 @@
-# Pipeline Composition Design: Simple Builder Pattern
+# Pipeline Composition Design: Source → Transform → Target Pattern
 
-**Status:** Design Document - v4.0 (Simple Builder)
+**Status:** Design Document - Final
 **Date:** 2025-11-06
 **Related:** DESIGN_UX.md
 
@@ -8,13 +8,14 @@
 
 ## Executive Summary
 
-This document defines a **simple builder pattern** for composing pipelines in Glacier. The key principle: **tasks are defined with decorators, pipelines are built with a fluent builder API**.
+This document defines the **source → transform → target** pattern for composing pipelines in Glacier. The key principle: **pipelines start with a source, chain transforms, and end with a target**.
 
 **Core Design:**
+- **Pipelines start with a source** - `.source(bucket)` defines where data comes from
 - **Tasks defined with decorators** - `@executor.task()` on execution resources
-- **Pipelines built with builder** - `Pipeline().step(task1).step(task2)`
-- **Dependencies are explicit** - passed as Task objects in the `inputs` dict
-- **Simple and declarative** - no AST parsing, no complex patterns
+- **Transforms chained together** - `.transform(task)` chains processing steps
+- **Pipelines end with a target** - `.target(bucket)` defines where data goes
+- **Simple and declarative** - clear data flow from source through transforms to target
 
 ---
 
@@ -23,7 +24,7 @@ This document defines a **simple builder pattern** for composing pipelines in Gl
 1. [Design Principles](#design-principles)
 2. [Core Pattern](#core-pattern)
 3. [Pipeline Builder API](#pipeline-builder-api)
-4. [Task Definition](#task-definition)
+4. [Sources and Targets](#sources-and-targets)
 5. [Composition Patterns](#composition-patterns)
 6. [Implementation Specification](#implementation-specification)
 
@@ -31,46 +32,62 @@ This document defines a **simple builder pattern** for composing pipelines in Gl
 
 ## Design Principles
 
-### 1. Tasks Defined with Decorators
+### 1. Clear Data Flow
+
+Pipelines have a clear structure: **Source → Transforms → Target**
+
+```python
+pipeline = (
+    Pipeline(name="etl")
+    .source(raw_data)           # Where data comes from
+    .transform(extract)         # Processing steps
+    .transform(transform)
+    .target(output)             # Where data goes
+)
+```
+
+### 2. Tasks Defined with Decorators
 
 Tasks are created using decorators on execution resources:
 
 ```python
 @local_exec.task()
-def extract(source) -> pl.LazyFrame:
-    return source.scan()
+def extract(df: pl.LazyFrame) -> pl.LazyFrame:
+    return df.filter(...)
 
 @lambda_exec.task()
 def transform(df: pl.LazyFrame) -> pl.LazyFrame:
-    return df.filter(pl.col("value") > 0)
+    return df.with_columns(...)
 ```
 
-### 2. Pipelines Built with Builder
+### 3. Explicit Sources and Targets
 
-Pipelines use a simple fluent builder pattern:
+Sources and targets are first-class concepts:
+- **Source**: Storage resource where input data lives
+- **Target**: Storage resource where output data goes
+
+```python
+# Sources and targets are storage resources
+raw_data = provider.bucket(bucket="data", path="input.parquet")
+output = provider.bucket(bucket="data", path="output.parquet")
+
+pipeline.source(raw_data).transform(process).target(output)
+```
+
+### 4. Fluent Builder Interface
+
+Use method chaining to build pipelines:
 
 ```python
 pipeline = (
     Pipeline(name="etl")
-    .step(extract, inputs={"source": raw_data})
-    .step(transform, inputs={"df": extract})
+    .source(raw_data)
+    .transform(extract)
+    .transform(clean)
+    .transform(aggregate)
+    .target(output)
 )
 ```
-
-### 3. Explicit Dependencies
-
-Dependencies declared through the `inputs` dict:
-
-```python
-.step(transform, inputs={"df": extract})  # transform depends on extract
-```
-
-### 4. No Magic
-
-- Tasks are objects
-- Pipeline composition is explicit
-- Dependencies are clear
-- No AST parsing needed
 
 ---
 
@@ -87,45 +104,54 @@ import polars as pl
 provider = Provider(config=AwsConfig(region="us-east-1"))
 local_exec = provider.local()
 lambda_exec = provider.serverless(config=LambdaConfig(memory=1024))
-raw_data = provider.bucket(bucket="data", path="input.parquet")
-output = provider.bucket(bucket="data", path="output.parquet")
 
-# 2. Define tasks with decorators
+# 2. Define sources and targets
+raw_data = provider.bucket(bucket="data-lake", path="raw/data.parquet")
+output = provider.bucket(bucket="data-lake", path="output/result.parquet")
+
+# 3. Define tasks with decorators
 @local_exec.task()
-def extract(source) -> pl.LazyFrame:
-    """Extract data from source."""
-    return source.scan()
+def extract(df: pl.LazyFrame) -> pl.LazyFrame:
+    """Extract and initial filtering."""
+    return df.filter(pl.col("value").is_not_null())
 
 @lambda_exec.task()
 def transform(df: pl.LazyFrame) -> pl.LazyFrame:
     """Transform data."""
-    return df.filter(pl.col("value") > 0)
+    return df.with_columns([
+        (pl.col("value") * 2).alias("doubled"),
+        pl.col("date").cast(pl.Date).alias("date")
+    ])
 
 @local_exec.task()
-def load(df: pl.LazyFrame, destination) -> None:
-    """Load data to destination."""
-    df.collect().write_parquet(destination.get_uri())
+def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
+    """Aggregate by category."""
+    return df.group_by("category").agg([
+        pl.col("value").sum().alias("total"),
+        pl.count().alias("count")
+    ])
 
-# 3. Build pipeline with builder pattern
+# 4. Build pipeline: source → transforms → target
 etl_pipeline = (
     Pipeline(name="etl")
-    .step(extract, inputs={"source": raw_data})
-    .step(transform, inputs={"df": extract})
-    .step(load, inputs={"df": transform, "destination": output})
+    .source(raw_data)
+    .transform(extract)
+    .transform(transform)
+    .transform(aggregate)
+    .target(output)
 )
 
-# 4. Execute
+# 5. Execute
 result = etl_pipeline.run(mode="local")
 ```
 
 ### Key Points
 
-1. **Tasks are Task objects** - created by `@executor.task()` decorator
-2. **Pipeline.step()** adds tasks to the pipeline and returns self (for chaining)
-3. **Tasks reference each other** in `inputs` dict
-4. **Pipeline tracks all tasks** internally
-5. **Dependencies extracted** from Task objects in inputs
-6. **Fluent interface** - chain `.step()` calls
+1. **Pipeline starts with .source()** - defines input data
+2. **Chain .transform()** calls - each transform takes output of previous
+3. **Pipeline ends with .target()** - defines output destination
+4. **Tasks are Task objects** - created by `@executor.task()` decorator
+5. **Clear data flow** - source → transform₁ → transform₂ → ... → target
 
 ---
 
@@ -138,7 +164,7 @@ class Pipeline:
     """
     Builder for composing Glacier pipelines.
 
-    Uses fluent interface for pipeline construction.
+    Pipelines follow the pattern: source → transforms → target
     """
 
     def __init__(self, name: str, description: str | None = None):
@@ -151,51 +177,96 @@ class Pipeline:
         """
         self.name = name
         self.description = description
-        self._steps: list[tuple[Task, dict]] = []
+        self._source: StorageResource | None = None
+        self._transforms: list[Task] = []
+        self._target: StorageResource | None = None
 
-    def step(
-        self,
-        task: Task,
-        inputs: dict[str, Any] | None = None,
-        name: str | None = None
-    ) -> "Pipeline":
+    def source(self, resource: StorageResource) -> "Pipeline":
         """
-        Add a task to the pipeline.
+        Set the source for this pipeline.
 
         Args:
-            task: Task to execute (created with @executor.task())
-            inputs: Dict mapping param names to values or other Tasks
-            name: Optional step name (overrides task name)
+            resource: Storage resource (bucket) to read from
 
         Returns:
             Self (for method chaining)
 
         Example:
-            pipeline = (
-                Pipeline(name="etl")
-                .step(extract, inputs={"source": raw_data})
-                .step(transform, inputs={"df": extract})
-            )
+            pipeline.source(raw_data_bucket)
         """
-        self._steps.append((task, inputs or {}, name))
+        self._source = resource
+        return self
+
+    def transform(self, task: Task) -> "Pipeline":
+        """
+        Add a transformation task to the pipeline.
+
+        Transforms are chained - each receives the output of the previous.
+
+        Args:
+            task: Task to execute (created with @executor.task())
+
+        Returns:
+            Self (for method chaining)
+
+        Example:
+            pipeline.transform(extract).transform(clean).transform(aggregate)
+        """
+        self._transforms.append(task)
+        return self
+
+    def target(self, resource: StorageResource) -> "Pipeline":
+        """
+        Set the target for this pipeline.
+
+        Args:
+            resource: Storage resource (bucket) to write to
+
+        Returns:
+            Self (for method chaining)
+
+        Example:
+            pipeline.target(output_bucket)
+        """
+        self._target = resource
         return self
 
     def build(self) -> DAG:
         """
-        Build the DAG from all steps.
+        Build the DAG from source, transforms, and target.
 
         Returns:
-            DAG object with all tasks and their dependencies
+            DAG object representing the pipeline
+
+        Raises:
+            ValueError: If source or target not set
         """
-        # Create TaskInstance for each step with its specific inputs
+        if self._source is None:
+            raise ValueError("Pipeline must have a source")
+        if self._target is None:
+            raise ValueError("Pipeline must have a target")
+
+        # Build DAG from the chain
         instances = []
-        for task, inputs, name in self._steps:
+        prev_output = self._source
+
+        for task in self._transforms:
             instance = TaskInstance(
                 task=task,
-                inputs=inputs,
-                name=name or task.name
+                inputs={"df": prev_output},  # Output of previous becomes input
+                name=task.name
             )
             instances.append(instance)
+            prev_output = instance
+
+        # Final step: write to target
+        # We need a built-in "write" task or handle this specially
+        write_instance = TaskInstance(
+            task=_create_write_task(),
+            inputs={"df": prev_output, "target": self._target},
+            name="write_to_target"
+        )
+        instances.append(write_instance)
 
         return DAG(instances)
 
@@ -231,223 +302,122 @@ class Pipeline:
             raise ValueError(f"Unknown mode: {mode}")
 ```
 
-### Alternative: Method Syntax
+### Alternative: Constructor-based
 
-Could also support non-chaining syntax:
+Could also set source and target in constructor:
 
 ```python
-pipeline = Pipeline(name="etl")
-pipeline.step(extract, inputs={"source": raw_data})
-pipeline.step(transform, inputs={"df": extract})
-pipeline.step(load, inputs={"df": transform, "destination": output})
+pipeline = Pipeline(
+    name="etl",
+    source=raw_data,
+    target=output
+)
 
-result = pipeline.run(mode="local")
+pipeline.transform(extract).transform(transform)
 ```
 
-Both work since `.step()` returns `self`.
+Or:
+
+```python
+pipeline = (
+    Pipeline(name="etl", source=raw_data, target=output)
+    .transform(extract)
+    .transform(transform)
+)
+```
 
 ---
 
-## Task Definition
+## Sources and Targets
 
-### Task Decorator
+### Sources
 
-Tasks are defined using decorators on execution resources:
+**Sources** are storage resources where input data comes from:
 
 ```python
-class ExecutionResource:
-    """Base class for execution resources."""
+# S3 bucket
+raw_data = provider.bucket(
+    bucket="data-lake",
+    path="raw/transactions.parquet"
+)
 
-    def task(
-        self,
-        func: Callable | None = None,
-        *,
-        name: str | None = None,
-        timeout: int | None = None,
-        retries: int = 0,
-        cache: bool = False,
-        **config
-    ) -> Task | Callable:
-        """
-        Decorator to create a Task bound to this execution resource.
-
-        Usage:
-            @local_exec.task()
-            def my_task(df: pl.LazyFrame) -> pl.LazyFrame:
-                return df.filter(...)
-
-        Args:
-            func: Function to wrap (auto-provided by decorator)
-            name: Optional task name
-            timeout: Task timeout in seconds
-            retries: Number of retries on failure
-            cache: Enable result caching
-            **config: Additional configuration
-
-        Returns:
-            Task object (or decorator function)
-        """
-        def decorator(f: Callable) -> Task:
-            return Task(
-                func=f,
-                executor=self,
-                name=name or f.__name__,
-                timeout=timeout,
-                retries=retries,
-                cache=cache,
-                config=config
-            )
-
-        if func is None:
-            return decorator
-        else:
-            return decorator(func)
+# Use as source
+pipeline.source(raw_data)
 ```
 
-### Task Object
+Sources can be:
+- S3 buckets (parquet files)
+- Azure Blob Storage
+- GCS buckets
+- Local files (for development)
+- Database tables (future)
+
+### Targets
+
+**Targets** are storage resources where output data is written:
 
 ```python
-class Task:
-    """
-    A task in a Glacier pipeline.
+# S3 bucket
+output = provider.bucket(
+    bucket="data-lake",
+    path="processed/aggregated.parquet"
+)
 
-    Tasks wrap functions and are bound to execution resources.
-    Created by @executor.task() decorator, not directly by users.
-    """
-
-    def __init__(
-        self,
-        func: Callable,
-        executor: ExecutionResource,
-        name: str,
-        timeout: int | None = None,
-        retries: int = 0,
-        cache: bool = False,
-        config: dict | None = None
-    ):
-        """
-        Create a Task.
-
-        Typically created by @executor.task() decorator.
-
-        Args:
-            func: Function to execute (LazyFrame -> LazyFrame)
-            executor: Execution resource (where this runs)
-            name: Task name
-            timeout: Task timeout in seconds
-            retries: Number of retries
-            cache: Enable caching
-            config: Additional configuration
-        """
-        self.func = func
-        self.executor = executor
-        self.name = name
-        self.timeout = timeout
-        self.retries = retries
-        self.cache = cache
-        self.config = config or {}
-
-        # Store signature
-        self.signature = inspect.signature(func)
-
-    def __call__(self, **inputs) -> Any:
-        """
-        Execute the task function directly (for testing).
-
-        Args:
-            **inputs: Input arguments
-
-        Returns:
-            Result of function execution
-        """
-        return self.func(**inputs)
-
-    def __repr__(self) -> str:
-        return f"Task(name='{self.name}', executor={self.executor})"
+# Use as target
+pipeline.target(output)
 ```
 
-### TaskInstance
+Targets can be:
+- S3 buckets
+- Azure Blob Storage
+- GCS buckets
+- Local files
+- Database tables (future)
 
-When a task is added to a pipeline, we create a TaskInstance that captures the specific inputs:
+### Reading from Source
+
+The first transform in the pipeline automatically receives data from the source:
 
 ```python
-class TaskInstance:
+@local_exec.task()
+def extract(df: pl.LazyFrame) -> pl.LazyFrame:
     """
-    An instance of a Task in a pipeline with specific inputs.
+    First transform receives data from source.
 
-    TaskInstances are created when tasks are added to pipelines via .step()
-    They capture the specific inputs for this usage of the task.
+    df is a LazyFrame scanning the source.
     """
+    return df.filter(pl.col("value") > 0)
 
-    def __init__(
-        self,
-        task: Task,
-        inputs: dict[str, Any],
-        name: str | None = None
-    ):
-        """
-        Create a TaskInstance.
+pipeline = (
+    Pipeline(name="etl")
+    .source(raw_data)       # Source provides df
+    .transform(extract)      # extract receives df from source
+    .transform(clean)        # clean receives df from extract
+    .target(output)
+)
+```
 
-        Args:
-            task: The Task object
-            inputs: Dict mapping param names to values or other Tasks/TaskInstances
-            name: Optional instance name
-        """
-        self.task = task
-        self.inputs = inputs
-        self.name = name or task.name
+### Writing to Target
 
-        # Extract dependencies
-        self.dependencies = self._extract_dependencies()
+The last transform's output is automatically written to the target:
 
-    def _extract_dependencies(self) -> list["TaskInstance"]:
-        """Extract upstream TaskInstance dependencies from inputs."""
-        deps = []
-        for value in self.inputs.values():
-            if isinstance(value, Task):
-                # If a bare Task is referenced, we need to find its instance
-                # This is handled during DAG building
-                pass
-            elif isinstance(value, TaskInstance):
-                deps.append(value)
-            elif isinstance(value, (list, tuple)):
-                for v in value:
-                    if isinstance(v, (Task, TaskInstance)):
-                        # Handle later
-                        pass
-        return deps
+```python
+@local_exec.task()
+def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
+    """
+    Last transform returns final result.
 
-    def execute(self, context: "ExecutionContext") -> Any:
-        """
-        Execute this task instance.
+    Result is automatically written to target.
+    """
+    return df.group_by("category").agg(pl.col("value").sum())
 
-        Args:
-            context: Execution context with resolved outputs
-
-        Returns:
-            Result of function execution
-        """
-        # Resolve inputs
-        resolved_inputs = {}
-        for param_name, value in self.inputs.items():
-            if isinstance(value, Task):
-                # Find the instance of this task in the pipeline
-                resolved_inputs[param_name] = context.get_output_for_task(value)
-            elif isinstance(value, TaskInstance):
-                resolved_inputs[param_name] = context.get_output(value)
-            elif isinstance(value, (list, tuple)):
-                resolved_inputs[param_name] = [
-                    context.get_output(v) if isinstance(v, (Task, TaskInstance)) else v
-                    for v in value
-                ]
-            else:
-                resolved_inputs[param_name] = value
-
-        # Execute
-        return self.task.func(**resolved_inputs)
-
-    def __repr__(self) -> str:
-        return f"TaskInstance(name='{self.name}', task={self.task.name})"
+pipeline = (
+    Pipeline(name="etl")
+    .source(raw_data)
+    .transform(extract)
+    .transform(aggregate)    # Output written to target
+    .target(output)
+)
 ```
 
 ---
@@ -459,211 +429,169 @@ class TaskInstance:
 ```python
 # Define tasks
 @local_exec.task()
-def task1(source): ...
+def extract(df): ...
 
 @lambda_exec.task()
-def task2(df): ...
+def clean(df): ...
 
 @local_exec.task()
-def task3(df): ...
+def aggregate(df): ...
 
 # Build pipeline
 pipeline = (
     Pipeline(name="sequential")
-    .step(task1, inputs={"source": raw_data})
-    .step(task2, inputs={"df": task1})
-    .step(task3, inputs={"df": task2})
+    .source(raw_data)
+    .transform(extract)
+    .transform(clean)
+    .transform(aggregate)
+    .target(output)
 )
 ```
 
-### 2. Parallel Pipeline (Fan-Out)
+### 2. Multi-Source Pipeline (Join)
+
+For pipelines with multiple sources, use a special join pattern:
 
 ```python
-# Define tasks
-@local_exec.task()
-def extract(source): ...
+# Define sources
+sales = provider.bucket(bucket="data", path="sales.parquet")
+customers = provider.bucket(bucket="data", path="customers.parquet")
+products = provider.bucket(bucket="data", path="products.parquet")
 
-@lambda_exec.task()
-def compute_stats(df): ...
-
-@lambda_exec.task()
-def compute_features(df): ...
-
-@lambda_exec.task()
-def validate(df): ...
-
-@local_exec.task()
-def generate_report(stats, features, validation): ...
-
-# Build pipeline
-pipeline = (
-    Pipeline(name="parallel")
-    .step(extract, inputs={"source": raw_data})
-    .step(compute_stats, inputs={"df": extract})
-    .step(compute_features, inputs={"df": extract})
-    .step(validate, inputs={"df": extract})
-    .step(generate_report, inputs={
-        "stats": compute_stats,
-        "features": compute_features,
-        "validation": validate
-    })
-)
-
-# All three (compute_stats, compute_features, validate) can run in parallel
-```
-
-### 3. Join Pipeline (Fan-In)
-
-```python
-# Define tasks
-@local_exec.task()
-def load_sales(source): ...
-
-@local_exec.task()
-def load_customers(source): ...
-
-@local_exec.task()
-def load_products(source): ...
-
+# Define join task
 @spark_exec.task()
-def join_all(sales, customers, products): ...
+def join_all(sales_df, customers_df, products_df):
+    return (
+        sales_df
+        .join(customers_df, on="customer_id")
+        .join(products_df, on="product_id")
+    )
 
-# Build pipeline
+# Build pipeline with multiple sources
 pipeline = (
     Pipeline(name="join")
-    .step(load_sales, inputs={"source": sales_bucket})
-    .step(load_customers, inputs={"source": customer_bucket})
-    .step(load_products, inputs={"source": product_bucket})
-    .step(join_all, inputs={
-        "sales": load_sales,
-        "customers": load_customers,
-        "products": load_products
+    .sources({
+        "sales_df": sales,
+        "customers_df": customers,
+        "products_df": products
+    })
+    .transform(join_all)
+    .transform(aggregate)
+    .target(output)
+)
+```
+
+Or use a simpler pattern with explicit inputs:
+
+```python
+pipeline = Pipeline(name="join")
+
+# Load each source separately
+load_sales = pipeline.load_source(sales, name="load_sales")
+load_customers = pipeline.load_source(customers, name="load_customers")
+load_products = pipeline.load_source(products, name="load_products")
+
+# Join them
+pipeline.transform(join_all, inputs={
+    "sales_df": load_sales,
+    "customers_df": load_customers,
+    "products_df": load_products
+})
+
+pipeline.transform(aggregate).target(output)
+```
+
+### 3. Multi-Target Pipeline (Split)
+
+For pipelines that write to multiple targets:
+
+```python
+# Define targets
+summary_output = provider.bucket(bucket="data", path="summary.parquet")
+detail_output = provider.bucket(bucket="data", path="detail.parquet")
+
+# Define split task
+@local_exec.task()
+def split_data(df):
+    summary = df.group_by("category").agg(pl.col("value").sum())
+    detail = df  # Keep detail
+    return summary, detail
+
+# Build pipeline with multiple targets
+pipeline = (
+    Pipeline(name="split")
+    .source(raw_data)
+    .transform(extract)
+    .transform(split_data)
+    .targets({
+        0: summary_output,  # First output to summary
+        1: detail_output    # Second output to detail
     })
 )
 ```
 
-### 4. Diamond Pipeline
-
-```python
-# Define tasks
-@local_exec.task()
-def extract(source): ...
-
-@lambda_exec.task()
-def branch1(df): ...
-
-@lambda_exec.task()
-def branch2(df): ...
-
-@local_exec.task()
-def merge(df1, df2): ...
-
-# Build pipeline
-pipeline = (
-    Pipeline(name="diamond")
-    .step(extract, inputs={"source": raw_data})
-    .step(branch1, inputs={"df": extract})
-    .step(branch2, inputs={"df": extract})
-    .step(merge, inputs={"df1": branch1, "df2": branch2})
-)
-```
-
-### 5. Multi-Output Tasks
-
-For tasks that return multiple values:
-
-```python
-# Define task that returns tuple
-@local_exec.task()
-def split_data(df):
-    train = df.filter(pl.col("split") == "train")
-    test = df.filter(pl.col("split") == "test")
-    return train, test
-
-@databricks_exec.task()
-def train_model(data): ...
-
-@local_exec.task()
-def evaluate(model, test_data): ...
-
-# Build pipeline
-pipeline = Pipeline(name="ml")
-
-# Add split step
-pipeline.step(split_data, inputs={"df": load_task})
-
-# Reference specific outputs using indexing
-# We need a way to reference tuple outputs...
-# Option: Use a helper or special syntax
-```
-
-For multi-output, we might need a helper:
-
-```python
-train, test = split_data.outputs(2)  # Returns tuple of TaskOutput objects
-
-pipeline = (
-    Pipeline(name="ml")
-    .step(split_data, inputs={"df": load_task})
-    .step(train_model, inputs={"data": train})
-    .step(evaluate, inputs={"model": train_model, "test_data": test})
-)
-```
-
-Or simpler - just reference the task and use indexing in inputs:
+Or simpler with explicit writes:
 
 ```python
 pipeline = (
-    Pipeline(name="ml")
-    .step(split_data, inputs={"df": load_task})
-    .step(train_model, inputs={"data": (split_data, 0)})  # Tuple (task, index)
-    .step(evaluate, inputs={"model": train_model, "test_data": (split_data, 1)})
+    Pipeline(name="split")
+    .source(raw_data)
+    .transform(extract)
+    .transform(create_summary)
+    .target(summary_output)
+    .branch()  # Start a new branch
+    .transform(create_detail)
+    .target(detail_output)
 )
 ```
 
-### 6. Conditional Pipelines
+### 4. Simple Pattern: Single Source, Single Target
 
-Use Python conditionals to build different pipelines:
+Most common case - keep it simple:
 
 ```python
-def build_etl_pipeline(mode: str):
-    """Build pipeline based on mode."""
-    pipeline = Pipeline(name=f"etl_{mode}")
-    pipeline.step(extract, inputs={"source": raw_data})
+pipeline = (
+    Pipeline(name="etl")
+    .source(raw_data)
+    .transform(extract)
+    .transform(clean)
+    .transform(aggregate)
+    .target(output)
+)
+```
+
+### 5. Conditional Transforms
+
+Use Python conditionals to add different transforms:
+
+```python
+def build_pipeline(mode: str):
+    pipeline = Pipeline(name=f"etl_{mode}").source(raw_data)
+
+    pipeline.transform(extract)
 
     if mode == "full":
-        pipeline.step(full_transform, inputs={"df": extract})
-        pipeline.step(load, inputs={"df": full_transform})
+        pipeline.transform(full_transform)
     else:
-        pipeline.step(quick_transform, inputs={"df": extract})
-        pipeline.step(load, inputs={"df": quick_transform})
+        pipeline.transform(quick_transform)
+
+    pipeline.transform(aggregate).target(output)
 
     return pipeline
 ```
 
-### 7. Dynamic Task Generation
+### 6. Dynamic Transforms
 
-Build pipelines dynamically:
+Add transforms in a loop:
 
 ```python
-def build_multi_file_pipeline(files: list[str]):
-    """Process multiple files in parallel."""
-    pipeline = Pipeline(name="multi_file")
+def build_pipeline(transform_steps: list[Task]):
+    pipeline = Pipeline(name="dynamic").source(raw_data)
 
-    # Define a task that can process any file
-    @lambda_exec.task()
-    def process_file(file_path):
-        return pl.scan_parquet(file_path).filter(...)
+    for step in transform_steps:
+        pipeline.transform(step)
 
-    # Add a step for each file
-    process_tasks = []
-    for i, file_path in enumerate(files):
-        pipeline.step(process_file, inputs={"file_path": file_path}, name=f"process_{i}")
-        process_tasks.append(process_file)  # Track for later reference
-
-    # Combine results
-    pipeline.step(combine, inputs={"results": process_tasks})
-
+    pipeline.target(output)
     return pipeline
 ```
 
@@ -676,15 +604,16 @@ def build_multi_file_pipeline(files: list[str]):
 **File:** `glacier/core/pipeline.py`
 
 ```python
-from typing import Any, Callable
+from typing import Any
 from glacier.core.task import Task, TaskInstance
 from glacier.core.dag import DAG
+from glacier.resources.bucket import Bucket
 
 class Pipeline:
     """
-    Builder for composing Glacier pipelines using fluent interface.
+    Builder for composing Glacier pipelines.
 
-    Pipelines are built by chaining .step() calls.
+    Pipelines follow: source → transforms → target
     """
 
     def __init__(self, name: str, description: str | None = None, **config):
@@ -699,132 +628,137 @@ class Pipeline:
         self.name = name
         self.description = description
         self.config = config
-        self._steps: list[tuple[Task, dict, str | None]] = []
+        self._source: Bucket | None = None
+        self._transforms: list[Task] = []
+        self._target: Bucket | None = None
         self._dag: DAG | None = None
 
-    def step(
-        self,
-        task: Task,
-        inputs: dict[str, Any] | None = None,
-        name: str | None = None
-    ) -> "Pipeline":
+    def source(self, resource: Bucket) -> "Pipeline":
         """
-        Add a task step to the pipeline.
+        Set the source for this pipeline.
 
         Args:
-            task: Task to execute (created with @executor.task())
-            inputs: Dict mapping param names to values or Tasks
-            name: Optional step name (overrides task name)
+            resource: Storage resource (bucket) to read from
 
         Returns:
             Self (for method chaining)
-
-        Example:
-            pipeline = (
-                Pipeline(name="etl")
-                .step(extract, inputs={"source": raw_data})
-                .step(transform, inputs={"df": extract})
-            )
         """
-        self._steps.append((task, inputs or {}, name))
+        if self._source is not None:
+            raise ValueError("Pipeline already has a source")
+        self._source = resource
+        return self
+
+    def transform(self, task: Task) -> "Pipeline":
+        """
+        Add a transformation task to the pipeline.
+
+        Args:
+            task: Task to execute (created with @executor.task())
+
+        Returns:
+            Self (for method chaining)
+        """
+        self._transforms.append(task)
         self._dag = None  # Invalidate cached DAG
+        return self
+
+    def target(self, resource: Bucket) -> "Pipeline":
+        """
+        Set the target for this pipeline.
+
+        Args:
+            resource: Storage resource (bucket) to write to
+
+        Returns:
+            Self (for method chaining)
+        """
+        if self._target is not None:
+            raise ValueError("Pipeline already has a target")
+        self._target = resource
         return self
 
     def build(self) -> DAG:
         """
-        Build the DAG from all steps.
+        Build the DAG from source, transforms, and target.
 
         Returns:
-            DAG object with all task instances
+            DAG object
+
+        Raises:
+            ValueError: If source or target not set
         """
         if self._dag is not None:
             return self._dag
 
-        # Create TaskInstance for each step
+        if self._source is None:
+            raise ValueError("Pipeline must have a source. Use .source(bucket)")
+        if self._target is None:
+            raise ValueError("Pipeline must have a target. Use .target(bucket)")
+        if not self._transforms:
+            raise ValueError("Pipeline must have at least one transform")
+
+        # Build chain of TaskInstances
         instances = []
-        task_to_instance = {}  # Map Task -> TaskInstance for dependency resolution
 
-        for task, inputs, name in self._steps:
-            # Resolve inputs: replace bare Task objects with their TaskInstances
-            resolved_inputs = {}
-            for param_name, value in inputs.items():
-                if isinstance(value, Task):
-                    # Find the TaskInstance for this Task
-                    if value in task_to_instance:
-                        resolved_inputs[param_name] = task_to_instance[value]
-                    else:
-                        raise ValueError(
-                            f"Task '{value.name}' used in inputs but not added to pipeline"
-                        )
-                elif isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], Task):
-                    # Multi-output: (task, index)
-                    ref_task, index = value
-                    if ref_task in task_to_instance:
-                        resolved_inputs[param_name] = (task_to_instance[ref_task], index)
-                    else:
-                        raise ValueError(
-                            f"Task '{ref_task.name}' used in inputs but not added to pipeline"
-                        )
-                else:
-                    resolved_inputs[param_name] = value
+        # First task reads from source
+        first_task = self._transforms[0]
+        first_instance = TaskInstance(
+            task=first_task,
+            inputs={"df": self._source},  # Source provides LazyFrame
+            name=first_task.name
+        )
+        instances.append(first_instance)
+        prev_instance = first_instance
 
-            # Create TaskInstance
+        # Chain subsequent transforms
+        for task in self._transforms[1:]:
             instance = TaskInstance(
                 task=task,
-                inputs=resolved_inputs,
-                name=name or task.name
+                inputs={"df": prev_instance},  # Previous output
+                name=task.name
             )
             instances.append(instance)
-            task_to_instance[task] = instance
+            prev_instance = instance
+
+        # Last task writes to target (handled by executor)
+        # Store target on the last instance for executor to use
+        prev_instance.target = self._target
 
         self._dag = DAG(instances)
         return self._dag
 
     def run(self, mode: str = "local", **kwargs) -> Any:
-        """
-        Execute the pipeline.
-
-        Args:
-            mode: Execution mode (local, cloud, analyze, generate)
-            **kwargs: Mode-specific arguments
-
-        Returns:
-            Execution result (mode-dependent)
-        """
+        """Execute the pipeline."""
         dag = self.build()
 
         if mode == "local":
             from glacier.runtime.local import LocalExecutor
             executor = LocalExecutor(dag)
             return executor.execute(**kwargs)
-
         elif mode == "cloud":
             from glacier.runtime.cloud import CloudExecutor
             executor = CloudExecutor(dag)
             return executor.execute(**kwargs)
-
         elif mode == "analyze":
             from glacier.codegen.analyzer import PipelineAnalysis
             return PipelineAnalysis(dag)
-
         elif mode == "generate":
             from glacier.codegen.terraform import TerraformGenerator
             generator = TerraformGenerator(dag)
             return generator.generate(**kwargs)
-
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
     def visualize(self) -> str:
-        """Generate Mermaid visualization of the pipeline."""
+        """Generate Mermaid visualization."""
         dag = self.build()
         return dag.to_mermaid()
 
     def __repr__(self) -> str:
-        return f"Pipeline(name='{self.name}', steps={len(self._steps)})"
+        return f"Pipeline(name='{self.name}', transforms={len(self._transforms)})"
 ```
 
-### 2. Task and TaskInstance Classes
+### 2. Task and TaskInstance
 
 **File:** `glacier/core/task.py`
 
@@ -836,8 +770,7 @@ class Task:
     """
     A reusable task definition.
 
-    Tasks are created by @executor.task() decorator and represent
-    a function bound to an execution resource.
+    Created by @executor.task() decorator.
     """
 
     def __init__(
@@ -860,7 +793,7 @@ class Task:
         self.signature = inspect.signature(func)
 
     def __call__(self, **inputs) -> Any:
-        """Execute the task directly (for testing)."""
+        """Execute directly (for testing)."""
         return self.func(**inputs)
 
     def __repr__(self) -> str:
@@ -870,8 +803,6 @@ class Task:
 class TaskInstance:
     """
     An instance of a Task in a pipeline with specific inputs.
-
-    Created when a task is added to a pipeline via Pipeline.step()
     """
 
     def __init__(
@@ -883,6 +814,7 @@ class TaskInstance:
         self.task = task
         self.inputs = inputs
         self.name = name
+        self.target = None  # Set by pipeline if this is the last task
         self.dependencies = self._extract_dependencies()
 
     def _extract_dependencies(self) -> list["TaskInstance"]:
@@ -891,16 +823,6 @@ class TaskInstance:
         for value in self.inputs.values():
             if isinstance(value, TaskInstance):
                 deps.append(value)
-            elif isinstance(value, tuple) and len(value) == 2:
-                # Multi-output: (TaskInstance, index)
-                if isinstance(value[0], TaskInstance):
-                    deps.append(value[0])
-            elif isinstance(value, (list, tuple)):
-                for v in value:
-                    if isinstance(v, TaskInstance):
-                        deps.append(v)
-                    elif isinstance(v, tuple) and len(v) == 2 and isinstance(v[0], TaskInstance):
-                        deps.append(v[0])
         return deps
 
     def execute(self, context: "ExecutionContext") -> Any:
@@ -909,26 +831,25 @@ class TaskInstance:
 
         for param_name, value in self.inputs.items():
             if isinstance(value, TaskInstance):
+                # Get output from previous task
                 resolved_inputs[param_name] = context.get_output(value)
-            elif isinstance(value, tuple) and len(value) == 2 and isinstance(value[0], TaskInstance):
-                # Multi-output: (TaskInstance, index)
-                instance, index = value
-                output = context.get_output(instance)
-                resolved_inputs[param_name] = output[index]
-            elif isinstance(value, (list, tuple)):
-                resolved_inputs[param_name] = [
-                    context.get_output(v) if isinstance(v, TaskInstance)
-                    else v[1](context.get_output(v[0])) if isinstance(v, tuple) and len(v) == 2
-                    else v
-                    for v in value
-                ]
+            elif hasattr(value, 'scan'):
+                # It's a storage resource (Bucket) - scan it
+                resolved_inputs[param_name] = value.scan()
             else:
                 resolved_inputs[param_name] = value
 
-        return self.task.func(**resolved_inputs)
+        # Execute task
+        result = self.task.func(**resolved_inputs)
+
+        # If this task has a target, write result to it
+        if self.target is not None:
+            result.collect().write_parquet(self.target.get_uri())
+
+        return result
 
     def __repr__(self) -> str:
-        return f"TaskInstance(name='{self.name}', task={self.task.name}, deps={len(self.dependencies)})"
+        return f"TaskInstance(name='{self.name}', task={self.task.name})"
 ```
 
 ### 3. ExecutionResource.task() Decorator
@@ -959,17 +880,6 @@ class ExecutionResource:
             @local_exec.task()
             def my_task(df: pl.LazyFrame) -> pl.LazyFrame:
                 return df.filter(...)
-
-        Args:
-            func: Function to wrap (auto-provided by decorator)
-            name: Optional task name
-            timeout: Task timeout
-            retries: Number of retries
-            cache: Enable caching
-            **config: Additional config
-
-        Returns:
-            Task object (or decorator function)
         """
         def decorator(f: Callable) -> Task:
             return Task(
@@ -988,7 +898,50 @@ class ExecutionResource:
             return decorator(func)
 ```
 
-### 4. DAG Class
+### 4. Storage Resource (Bucket)
+
+**File:** `glacier/resources/bucket.py`
+
+```python
+import polars as pl
+
+class Bucket:
+    """
+    Storage resource (bucket) for reading/writing data.
+    """
+
+    def __init__(
+        self,
+        provider: "Provider",
+        bucket: str,
+        path: str,
+        config: dict | None = None
+    ):
+        self.provider = provider
+        self.bucket = bucket
+        self.path = path
+        self.config = config or {}
+
+    def scan(self) -> pl.LazyFrame:
+        """
+        Scan the data source as a LazyFrame.
+
+        Returns:
+            LazyFrame for lazy reading
+        """
+        uri = self.get_uri()
+        return pl.scan_parquet(uri)
+
+    def get_uri(self) -> str:
+        """Get the full URI for this bucket."""
+        # Implementation depends on provider (S3, GCS, Azure, local)
+        return f"s3://{self.bucket}/{self.path}"
+
+    def __repr__(self) -> str:
+        return f"Bucket(bucket='{self.bucket}', path='{self.path}')"
+```
+
+### 5. DAG Class
 
 **File:** `glacier/core/dag.py`
 
@@ -1076,7 +1029,7 @@ class DAG:
         return f"DAG(instances={len(self.instances)})"
 ```
 
-### 5. Export from glacier/__init__.py
+### 6. Export from glacier/__init__.py
 
 ```python
 from glacier.providers import Provider
@@ -1092,40 +1045,46 @@ __all__ = ["Provider", "Pipeline"]
 ### Core Pattern
 
 ```python
-# 1. Define tasks with decorators
+# 1. Define resources
+raw_data = provider.bucket(bucket="data", path="input.parquet")
+output = provider.bucket(bucket="data", path="output.parquet")
+
+# 2. Define tasks with decorators
 @local_exec.task()
-def extract(source): ...
+def extract(df): ...
 
 @lambda_exec.task()
 def transform(df): ...
 
-# 2. Build pipeline with simple builder
+# 3. Build pipeline: source → transforms → target
 pipeline = (
     Pipeline(name="etl")
-    .step(extract, inputs={"source": raw_data})
-    .step(transform, inputs={"df": extract})
+    .source(raw_data)
+    .transform(extract)
+    .transform(transform)
+    .target(output)
 )
 
-# 3. Execute
+# 4. Execute
 result = pipeline.run(mode="local")
 ```
 
 ### Benefits
 
-✅ **Simple and clean** - Just `.step()` chaining
+✅ **Clear data flow** - Source → Transforms → Target
+✅ **Simple builder pattern** - `.source().transform().target()`
+✅ **First-class sources and targets** - Storage resources
 ✅ **Tasks defined with decorators** - On execution resources
-✅ **Explicit dependencies** - Via inputs dict
 ✅ **Fluent interface** - Natural method chaining
-✅ **No magic** - No AST parsing needed
-✅ **Type safe** - Tasks and inputs are typed
-✅ **Flexible** - Easy conditionals and dynamic pipelines
+✅ **No magic** - Explicit and declarative
 
 ### Key Classes
 
-- **Pipeline** - Fluent builder for composing pipelines
+- **Pipeline** - Builder with `.source()`, `.transform()`, `.target()`
 - **Task** - Reusable task definition (from decorator)
-- **TaskInstance** - Task with specific inputs in a pipeline
-- **DAG** - Directed acyclic graph of task instances
+- **TaskInstance** - Task with inputs in pipeline
+- **Bucket** - Storage resource (source/target)
+- **DAG** - Directed acyclic graph
 
 ---
 
