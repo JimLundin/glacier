@@ -1,4 +1,4 @@
-# Pipeline Composition Design: Source → Transform → Target Pattern
+# Pipeline Composition Design: Storage-First Pattern
 
 **Status:** Design Document - Final
 **Date:** 2025-11-06
@@ -8,14 +8,13 @@
 
 ## Executive Summary
 
-This document defines the **source → transform → target** pattern for composing pipelines in Glacier. The key principle: **pipelines start with a source, chain transforms, and end with a target**.
+This document defines a **storage-first** pattern for composing pipelines in Glacier. The key principle: **storage is the fundamental unit - every transform reads from storage and writes to storage**.
 
 **Core Design:**
-- **Pipelines start with a source** - `.source(bucket)` defines where data comes from
-- **Tasks defined with decorators** - `@executor.task()` on execution resources
-- **Transforms chained together** - `.transform(task)` chains processing steps
-- **Pipelines end with a target** - `.target(bucket)` defines where data goes
-- **Simple and declarative** - clear data flow from source through transforms to target
+- **Storage is explicit** - Every data materialization point is visible
+- **Transforms go storage → storage** - Read from bucket, write to bucket
+- **No hidden serialization** - All storage writes are explicit in pipeline definition
+- **Simple pattern** - `.source(bucket).transform(task).to(bucket)`
 
 ---
 
@@ -24,7 +23,7 @@ This document defines the **source → transform → target** pattern for compos
 1. [Design Principles](#design-principles)
 2. [Core Pattern](#core-pattern)
 3. [Pipeline Builder API](#pipeline-builder-api)
-4. [Sources and Targets](#sources-and-targets)
+4. [Why Storage-First](#why-storage-first)
 5. [Composition Patterns](#composition-patterns)
 6. [Implementation Specification](#implementation-specification)
 
@@ -32,61 +31,50 @@ This document defines the **source → transform → target** pattern for compos
 
 ## Design Principles
 
-### 1. Clear Data Flow
+### 1. Storage is Explicit
 
-Pipelines have a clear structure: **Source → Transforms → Target**
-
-```python
-pipeline = (
-    Pipeline(name="etl")
-    .source(raw_data)           # Where data comes from
-    .transform(extract)         # Processing steps
-    .transform(transform)
-    .target(output)             # Where data goes
-)
-```
-
-### 2. Tasks Defined with Decorators
-
-Tasks are created using decorators on execution resources:
-
-```python
-@local_exec.task()
-def extract(df: pl.LazyFrame) -> pl.LazyFrame:
-    return df.filter(...)
-
-@lambda_exec.task()
-def transform(df: pl.LazyFrame) -> pl.LazyFrame:
-    return df.with_columns(...)
-```
-
-### 3. Explicit Sources and Targets
-
-Sources and targets are first-class concepts:
-- **Source**: Storage resource where input data lives
-- **Target**: Storage resource where output data goes
-
-```python
-# Sources and targets are storage resources
-raw_data = provider.bucket(bucket="data", path="input.parquet")
-output = provider.bucket(bucket="data", path="output.parquet")
-
-pipeline.source(raw_data).transform(process).target(output)
-```
-
-### 4. Fluent Builder Interface
-
-Use method chaining to build pipelines:
+Every data materialization point is visible in the pipeline:
 
 ```python
 pipeline = (
     Pipeline(name="etl")
-    .source(raw_data)
-    .transform(extract)
-    .transform(clean)
-    .transform(aggregate)
-    .target(output)
+    .source(raw_data)          # Read from storage
+    .transform(extract)         # Transform in memory
+    .to(intermediate1)          # Write to storage (EXPLICIT)
+    .transform(transform)       # Read from intermediate1, transform
+    .to(output)                 # Write to storage (EXPLICIT)
 )
+```
+
+### 2. Transforms Read/Write Storage
+
+Every transform:
+- **Reads** from a storage resource (bucket)
+- **Writes** to a storage resource (bucket)
+
+```python
+# This is the reality:
+# raw_data → extract → intermediate1 → transform → output
+#   (S3)      (local)      (S3)         (lambda)    (S3)
+```
+
+### 3. No Hidden Magic
+
+User explicitly declares:
+- Where data is read from
+- Where data is written to
+- When serialization happens (at every `.to()`)
+
+### 4. Execution Boundaries Are Storage Boundaries
+
+Different executors can't directly share data - they share via storage:
+
+```python
+.source(raw_data)      # S3
+.transform(extract)    # Local executor reads from S3
+.to(intermediate)      # Local writes back to S3
+.transform(process)    # Lambda reads from S3
+.to(output)            # Lambda writes to S3
 ```
 
 ---
@@ -105,53 +93,51 @@ provider = Provider(config=AwsConfig(region="us-east-1"))
 local_exec = provider.local()
 lambda_exec = provider.serverless(config=LambdaConfig(memory=1024))
 
-# 2. Define sources and targets
+# 2. Define storage resources
 raw_data = provider.bucket(bucket="data-lake", path="raw/data.parquet")
+intermediate1 = provider.bucket(bucket="data-lake", path="intermediate/step1.parquet")
+intermediate2 = provider.bucket(bucket="data-lake", path="intermediate/step2.parquet")
 output = provider.bucket(bucket="data-lake", path="output/result.parquet")
 
 # 3. Define tasks with decorators
 @local_exec.task()
 def extract(df: pl.LazyFrame) -> pl.LazyFrame:
-    """Extract and initial filtering."""
+    """Extract and filter."""
     return df.filter(pl.col("value").is_not_null())
 
 @lambda_exec.task()
 def transform(df: pl.LazyFrame) -> pl.LazyFrame:
     """Transform data."""
-    return df.with_columns([
-        (pl.col("value") * 2).alias("doubled"),
-        pl.col("date").cast(pl.Date).alias("date")
-    ])
+    return df.with_columns((pl.col("value") * 2).alias("doubled"))
 
 @local_exec.task()
 def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
     """Aggregate by category."""
-    return df.group_by("category").agg([
-        pl.col("value").sum().alias("total"),
-        pl.count().alias("count")
-    ])
+    return df.group_by("category").agg(pl.col("value").sum())
 
-# 4. Build pipeline: source → transforms → target
-etl_pipeline = (
+# 4. Build pipeline: storage → transform → storage → transform → storage
+pipeline = (
     Pipeline(name="etl")
-    .source(raw_data)
-    .transform(extract)
-    .transform(transform)
-    .transform(aggregate)
-    .target(output)
+    .source(raw_data)          # Read from S3
+    .transform(extract)         # Process locally
+    .to(intermediate1)          # Write to S3 (EXPLICIT)
+    .transform(transform)       # Lambda reads from S3
+    .to(intermediate2)          # Write to S3 (EXPLICIT)
+    .transform(aggregate)       # Process locally, reads from S3
+    .to(output)                 # Write to S3 (EXPLICIT)
 )
 
 # 5. Execute
-result = etl_pipeline.run(mode="local")
+result = pipeline.run(mode="local")
 ```
 
 ### Key Points
 
-1. **Pipeline starts with .source()** - defines input data
-2. **Chain .transform()** calls - each transform takes output of previous
-3. **Pipeline ends with .target()** - defines output destination
-4. **Tasks are Task objects** - created by `@executor.task()` decorator
-5. **Clear data flow** - source → transform₁ → transform₂ → ... → target
+1. **`.source(bucket)`** - Start by reading from storage
+2. **`.transform(task)`** - Apply transformation (reads from last storage)
+3. **`.to(bucket)`** - Write result to storage (materializes data, explicit serialization)
+4. **Chaining** - Next `.transform()` automatically reads from the previous `.to()` bucket
+5. **No hidden writes** - All storage writes are explicit via `.to()`
 
 ---
 
@@ -164,123 +150,118 @@ class Pipeline:
     """
     Builder for composing Glacier pipelines.
 
-    Pipelines follow the pattern: source → transforms → target
+    Pattern: source → transform → to → transform → to → ...
     """
 
     def __init__(self, name: str, description: str | None = None):
-        """
-        Create a new pipeline.
-
-        Args:
-            name: Pipeline name
-            description: Optional description
-        """
+        """Create a new pipeline."""
         self.name = name
         self.description = description
-        self._source: StorageResource | None = None
-        self._transforms: list[Task] = []
-        self._target: StorageResource | None = None
+        self._steps: list[PipelineStep] = []
+        self._current_source: Bucket | None = None
 
-    def source(self, resource: StorageResource) -> "Pipeline":
+    def source(self, bucket: Bucket) -> "Pipeline":
         """
-        Set the source for this pipeline.
+        Start pipeline by reading from a storage resource.
 
         Args:
-            resource: Storage resource (bucket) to read from
+            bucket: Storage resource to read from
 
         Returns:
-            Self (for method chaining)
+            Self (for chaining)
 
         Example:
-            pipeline.source(raw_data_bucket)
+            pipeline.source(raw_data)
         """
-        self._source = resource
+        if self._current_source is not None:
+            raise ValueError("Pipeline already has a source for current step")
+        self._current_source = bucket
         return self
 
     def transform(self, task: Task) -> "Pipeline":
         """
-        Add a transformation task to the pipeline.
+        Apply a transformation.
 
-        Transforms are chained - each receives the output of the previous.
+        The transform reads from the current source (set by .source() or previous .to())
 
         Args:
             task: Task to execute (created with @executor.task())
 
         Returns:
-            Self (for method chaining)
+            Self (for chaining)
 
         Example:
-            pipeline.transform(extract).transform(clean).transform(aggregate)
+            pipeline.transform(extract_task)
         """
-        self._transforms.append(task)
+        if self._current_source is None:
+            raise ValueError("Must call .source() before .transform()")
+
+        self._steps.append(TransformStep(
+            source=self._current_source,
+            task=task
+        ))
+        # After transform, we need .to() to set next source
+        self._current_source = None
         return self
 
-    def target(self, resource: StorageResource) -> "Pipeline":
+    def to(self, bucket: Bucket) -> "Pipeline":
         """
-        Set the target for this pipeline.
+        Write transform output to storage.
+
+        This materializes the data and makes it available for the next transform.
 
         Args:
-            resource: Storage resource (bucket) to write to
+            bucket: Storage resource to write to
 
         Returns:
-            Self (for method chaining)
+            Self (for chaining)
 
         Example:
-            pipeline.target(output_bucket)
+            pipeline.to(intermediate_bucket)
         """
-        self._target = resource
+        if not self._steps:
+            raise ValueError("Must call .transform() before .to()")
+
+        last_step = self._steps[-1]
+        if last_step.target is not None:
+            raise ValueError("Transform already has a target")
+
+        # Set target on last step
+        last_step.target = bucket
+
+        # This becomes the source for the next transform
+        self._current_source = bucket
+
         return self
 
     def build(self) -> DAG:
-        """
-        Build the DAG from source, transforms, and target.
+        """Build the DAG from pipeline steps."""
+        if not self._steps:
+            raise ValueError("Pipeline has no steps")
 
-        Returns:
-            DAG object representing the pipeline
+        # Validate all steps have targets
+        for step in self._steps:
+            if step.target is None:
+                raise ValueError(
+                    f"Transform '{step.task.name}' has no target. "
+                    "Use .to(bucket) after each .transform()"
+                )
 
-        Raises:
-            ValueError: If source or target not set
-        """
-        if self._source is None:
-            raise ValueError("Pipeline must have a source")
-        if self._target is None:
-            raise ValueError("Pipeline must have a target")
-
-        # Build DAG from the chain
+        # Build TaskInstances
         instances = []
-        prev_output = self._source
-
-        for task in self._transforms:
+        for step in self._steps:
             instance = TaskInstance(
-                task=task,
-                inputs={"df": prev_output},  # Output of previous becomes input
-                name=task.name
+                task=step.task,
+                source=step.source,
+                target=step.target,
+                name=step.task.name
             )
             instances.append(instance)
-            prev_output = instance
-
-        # Final step: write to target
-        # We need a built-in "write" task or handle this specially
-        write_instance = TaskInstance(
-            task=_create_write_task(),
-            inputs={"df": prev_output, "target": self._target},
-            name="write_to_target"
-        )
-        instances.append(write_instance)
 
         return DAG(instances)
 
     def run(self, mode: str = "local", **kwargs) -> Any:
-        """
-        Execute the pipeline.
-
-        Args:
-            mode: Execution mode (local, cloud, analyze, generate)
-            **kwargs: Mode-specific arguments
-
-        Returns:
-            Execution result
-        """
+        """Execute the pipeline."""
         dag = self.build()
 
         if mode == "local":
@@ -291,134 +272,83 @@ class Pipeline:
             from glacier.runtime.cloud import CloudExecutor
             executor = CloudExecutor(dag)
             return executor.execute(**kwargs)
-        elif mode == "analyze":
-            from glacier.codegen.analyzer import PipelineAnalysis
-            return PipelineAnalysis(dag)
-        elif mode == "generate":
-            from glacier.codegen.terraform import TerraformGenerator
-            generator = TerraformGenerator(dag)
-            return generator.generate(**kwargs)
         else:
             raise ValueError(f"Unknown mode: {mode}")
 ```
 
-### Alternative: Constructor-based
-
-Could also set source and target in constructor:
+### PipelineStep
 
 ```python
-pipeline = Pipeline(
-    name="etl",
-    source=raw_data,
-    target=output
-)
-
-pipeline.transform(extract).transform(transform)
-```
-
-Or:
-
-```python
-pipeline = (
-    Pipeline(name="etl", source=raw_data, target=output)
-    .transform(extract)
-    .transform(transform)
-)
+@dataclass
+class TransformStep:
+    """A step in the pipeline: source → transform → target."""
+    source: Bucket
+    task: Task
+    target: Bucket | None = None
 ```
 
 ---
 
-## Sources and Targets
+## Why Storage-First?
 
-### Sources
+### The Physical Reality
 
-**Sources** are storage resources where input data comes from:
+Different execution environments cannot directly share in-memory data:
 
-```python
-# S3 bucket
-raw_data = provider.bucket(
-    bucket="data-lake",
-    path="raw/transactions.parquet"
-)
-
-# Use as source
-pipeline.source(raw_data)
+```
+┌─────────┐         ┌─────────┐         ┌─────────────┐
+│  Local  │  ────>  │ Lambda  │  ────>  │ Databricks  │
+└─────────┘         └─────────┘         └─────────────┘
+     ❌ Cannot directly pass LazyFrame ❌
 ```
 
-Sources can be:
-- S3 buckets (parquet files)
-- Azure Blob Storage
-- GCS buckets
-- Local files (for development)
-- Database tables (future)
+They must communicate via shared storage:
 
-### Targets
-
-**Targets** are storage resources where output data is written:
-
-```python
-# S3 bucket
-output = provider.bucket(
-    bucket="data-lake",
-    path="processed/aggregated.parquet"
-)
-
-# Use as target
-pipeline.target(output)
+```
+┌─────────┐         ┌─────────┐         ┌─────────────┐
+│  Local  │         │ Lambda  │         │ Databricks  │
+└────┬────┘         └────┬────┘         └──────┬──────┘
+     │                   │                      │
+     ↓ write       read ↓ write           read ↓
+┌────────────────────────────────────────────────────┐
+│                      S3 Buckets                    │
+│  raw.parquet  intermediate1.parquet  output.parquet│
+└────────────────────────────────────────────────────┘
 ```
 
-Targets can be:
-- S3 buckets
-- Azure Blob Storage
-- GCS buckets
-- Local files
-- Database tables (future)
+### Why Make It Explicit?
 
-### Reading from Source
-
-The first transform in the pipeline automatically receives data from the source:
-
+**Option A: Hidden (Bad)**
 ```python
-@local_exec.task()
-def extract(df: pl.LazyFrame) -> pl.LazyFrame:
-    """
-    First transform receives data from source.
-
-    df is a LazyFrame scanning the source.
-    """
-    return df.filter(pl.col("value") > 0)
-
-pipeline = (
-    Pipeline(name="etl")
-    .source(raw_data)       # Source provides df
-    .transform(extract)      # extract receives df from source
-    .transform(clean)        # clean receives df from extract
-    .target(output)
-)
-```
-
-### Writing to Target
-
-The last transform's output is automatically written to the target:
-
-```python
-@local_exec.task()
-def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
-    """
-    Last transform returns final result.
-
-    Result is automatically written to target.
-    """
-    return df.group_by("category").agg(pl.col("value").sum())
-
 pipeline = (
     Pipeline(name="etl")
     .source(raw_data)
-    .transform(extract)
-    .transform(aggregate)    # Output written to target
+    .transform(extract)    # local
+    .transform(process)    # lambda - WHERE is intermediate storage???
     .target(output)
 )
 ```
+- User doesn't see intermediate storage
+- Surprise storage costs
+- Hard to debug
+- No control over data location
+
+**Option B: Explicit (Good)**
+```python
+pipeline = (
+    Pipeline(name="etl")
+    .source(raw_data)
+    .transform(extract)        # local
+    .to(intermediate)          # EXPLICIT: data written here
+    .transform(process)        # lambda reads from intermediate
+    .to(output)                # EXPLICIT: final output here
+)
+```
+- Clear where data is stored
+- No surprises
+- Easy to debug (check intermediate data)
+- Full control over storage locations
+- Matches physical reality
 
 ---
 
@@ -427,12 +357,18 @@ pipeline = (
 ### 1. Sequential Pipeline
 
 ```python
+# Define storage
+raw_data = provider.bucket(bucket="data", path="raw.parquet")
+intermediate1 = provider.bucket(bucket="data", path="intermediate1.parquet")
+intermediate2 = provider.bucket(bucket="data", path="intermediate2.parquet")
+output = provider.bucket(bucket="data", path="output.parquet")
+
 # Define tasks
 @local_exec.task()
 def extract(df): ...
 
 @lambda_exec.task()
-def clean(df): ...
+def transform(df): ...
 
 @local_exec.task()
 def aggregate(df): ...
@@ -442,156 +378,120 @@ pipeline = (
     Pipeline(name="sequential")
     .source(raw_data)
     .transform(extract)
-    .transform(clean)
+    .to(intermediate1)
+    .transform(transform)
+    .to(intermediate2)
     .transform(aggregate)
-    .target(output)
+    .to(output)
 )
 ```
 
-### 2. Multi-Source Pipeline (Join)
+### 2. Same Executor (Multiple Transforms)
 
-For pipelines with multiple sources, use a special join pattern:
+When transforms run on the same executor, you might still want intermediate storage for checkpointing:
+
+```python
+@local_exec.task()
+def step1(df): ...
+
+@local_exec.task()
+def step2(df): ...
+
+@local_exec.task()
+def step3(df): ...
+
+pipeline = (
+    Pipeline(name="local_pipeline")
+    .source(raw_data)
+    .transform(step1)
+    .to(checkpoint1)    # Optional checkpoint
+    .transform(step2)
+    .to(checkpoint2)    # Optional checkpoint
+    .transform(step3)
+    .to(output)
+)
+```
+
+Or skip intermediate storage if all on same executor and you don't want checkpoints:
+
+```python
+# For this, we'd need a different pattern... maybe .chain()?
+```
+
+Actually, with this pattern, **you always write to storage**. If you want to skip intermediate storage, you'd need to use a different executor pattern (future optimization).
+
+### 3. Multiple Sources (Join)
+
+For joins, you need multiple source → transform flows:
 
 ```python
 # Define sources
 sales = provider.bucket(bucket="data", path="sales.parquet")
 customers = provider.bucket(bucket="data", path="customers.parquet")
-products = provider.bucket(bucket="data", path="products.parquet")
+joined_output = provider.bucket(bucket="data", path="joined.parquet")
 
-# Define join task
-@spark_exec.task()
-def join_all(sales_df, customers_df, products_df):
-    return (
-        sales_df
-        .join(customers_df, on="customer_id")
-        .join(products_df, on="product_id")
-    )
-
-# Build pipeline with multiple sources
-pipeline = (
-    Pipeline(name="join")
-    .sources({
-        "sales_df": sales,
-        "customers_df": customers,
-        "products_df": products
-    })
-    .transform(join_all)
-    .transform(aggregate)
-    .target(output)
-)
-```
-
-Or use a simpler pattern with explicit inputs:
-
-```python
-pipeline = Pipeline(name="join")
-
-# Load each source separately
-load_sales = pipeline.load_source(sales, name="load_sales")
-load_customers = pipeline.load_source(customers, name="load_customers")
-load_products = pipeline.load_source(products, name="load_products")
-
-# Join them
-pipeline.transform(join_all, inputs={
-    "sales_df": load_sales,
-    "customers_df": load_customers,
-    "products_df": load_products
-})
-
-pipeline.transform(aggregate).target(output)
-```
-
-### 3. Multi-Target Pipeline (Split)
-
-For pipelines that write to multiple targets:
-
-```python
-# Define targets
-summary_output = provider.bucket(bucket="data", path="summary.parquet")
-detail_output = provider.bucket(bucket="data", path="detail.parquet")
-
-# Define split task
+# Define tasks
 @local_exec.task()
-def split_data(df):
-    summary = df.group_by("category").agg(pl.col("value").sum())
-    detail = df  # Keep detail
-    return summary, detail
+def load_sales(df): ...
 
-# Build pipeline with multiple targets
-pipeline = (
-    Pipeline(name="split")
-    .source(raw_data)
-    .transform(extract)
-    .transform(split_data)
-    .targets({
-        0: summary_output,  # First output to summary
-        1: detail_output    # Second output to detail
-    })
+@local_exec.task()
+def load_customers(df): ...
+
+@spark_exec.task()
+def join_data(sales_df, customers_df): ...
+
+# Build pipeline - needs different pattern for multiple sources
+# Option A: Multiple pipelines
+sales_pipeline = (
+    Pipeline(name="load_sales")
+    .source(sales)
+    .transform(load_sales)
+    .to(sales_prepared)
 )
+
+customers_pipeline = (
+    Pipeline(name="load_customers")
+    .source(customers)
+    .transform(load_customers)
+    .to(customers_prepared)
+)
+
+join_pipeline = (
+    Pipeline(name="join")
+    .sources({"sales_df": sales_prepared, "customers_df": customers_prepared})
+    .transform(join_data)
+    .to(joined_output)
+)
+
+# Option B: Single pipeline with branches (more complex API)
 ```
 
-Or simpler with explicit writes:
+For multi-source, the API would need extension. Keep it simple for now: **one source per pipeline**.
 
-```python
-pipeline = (
-    Pipeline(name="split")
-    .source(raw_data)
-    .transform(extract)
-    .transform(create_summary)
-    .target(summary_output)
-    .branch()  # Start a new branch
-    .transform(create_detail)
-    .target(detail_output)
-)
-```
-
-### 4. Simple Pattern: Single Source, Single Target
-
-Most common case - keep it simple:
-
-```python
-pipeline = (
-    Pipeline(name="etl")
-    .source(raw_data)
-    .transform(extract)
-    .transform(clean)
-    .transform(aggregate)
-    .target(output)
-)
-```
-
-### 5. Conditional Transforms
-
-Use Python conditionals to add different transforms:
+### 4. Conditional Pipelines
 
 ```python
 def build_pipeline(mode: str):
-    pipeline = Pipeline(name=f"etl_{mode}").source(raw_data)
-
-    pipeline.transform(extract)
+    pipeline = Pipeline(name=f"etl_{mode}")
+    pipeline.source(raw_data).transform(extract)
 
     if mode == "full":
-        pipeline.transform(full_transform)
+        pipeline.to(intermediate).transform(full_process).to(output)
     else:
-        pipeline.transform(quick_transform)
-
-    pipeline.transform(aggregate).target(output)
+        pipeline.to(output)  # Skip processing
 
     return pipeline
 ```
 
-### 6. Dynamic Transforms
-
-Add transforms in a loop:
+### 5. Dynamic Pipelines
 
 ```python
-def build_pipeline(transform_steps: list[Task]):
+def build_pipeline(steps: list[Task], checkpoints: list[Bucket]):
     pipeline = Pipeline(name="dynamic").source(raw_data)
 
-    for step in transform_steps:
-        pipeline.transform(step)
+    for task, checkpoint in zip(steps, checkpoints):
+        pipeline.transform(task).to(checkpoint)
 
-    pipeline.target(output)
     return pipeline
 ```
 
@@ -605,124 +505,95 @@ def build_pipeline(transform_steps: list[Task]):
 
 ```python
 from typing import Any
+from dataclasses import dataclass
 from glacier.core.task import Task, TaskInstance
 from glacier.core.dag import DAG
 from glacier.resources.bucket import Bucket
+
+@dataclass
+class TransformStep:
+    """A step in the pipeline: source → transform → target."""
+    source: Bucket
+    task: Task
+    target: Bucket | None = None
 
 class Pipeline:
     """
     Builder for composing Glacier pipelines.
 
-    Pipelines follow: source → transforms → target
+    Pattern: source → transform → to → transform → to → ...
     """
 
     def __init__(self, name: str, description: str | None = None, **config):
-        """
-        Create a new pipeline.
-
-        Args:
-            name: Pipeline name
-            description: Optional description
-            **config: Additional configuration
-        """
         self.name = name
         self.description = description
         self.config = config
-        self._source: Bucket | None = None
-        self._transforms: list[Task] = []
-        self._target: Bucket | None = None
+        self._steps: list[TransformStep] = []
+        self._current_source: Bucket | None = None
         self._dag: DAG | None = None
 
-    def source(self, resource: Bucket) -> "Pipeline":
-        """
-        Set the source for this pipeline.
-
-        Args:
-            resource: Storage resource (bucket) to read from
-
-        Returns:
-            Self (for method chaining)
-        """
-        if self._source is not None:
-            raise ValueError("Pipeline already has a source")
-        self._source = resource
+    def source(self, bucket: Bucket) -> "Pipeline":
+        """Start pipeline by reading from storage."""
+        if self._current_source is not None:
+            raise ValueError("Pipeline already has a source for current step")
+        self._current_source = bucket
         return self
 
     def transform(self, task: Task) -> "Pipeline":
-        """
-        Add a transformation task to the pipeline.
+        """Apply a transformation (reads from current source)."""
+        if self._current_source is None:
+            raise ValueError("Must call .source() before .transform()")
 
-        Args:
-            task: Task to execute (created with @executor.task())
-
-        Returns:
-            Self (for method chaining)
-        """
-        self._transforms.append(task)
-        self._dag = None  # Invalidate cached DAG
+        step = TransformStep(
+            source=self._current_source,
+            task=task,
+            target=None
+        )
+        self._steps.append(step)
+        self._current_source = None  # Must call .to() next
+        self._dag = None
         return self
 
-    def target(self, resource: Bucket) -> "Pipeline":
-        """
-        Set the target for this pipeline.
+    def to(self, bucket: Bucket) -> "Pipeline":
+        """Write transform output to storage."""
+        if not self._steps:
+            raise ValueError("Must call .transform() before .to()")
 
-        Args:
-            resource: Storage resource (bucket) to write to
+        last_step = self._steps[-1]
+        if last_step.target is not None:
+            raise ValueError("Transform already has a target")
 
-        Returns:
-            Self (for method chaining)
-        """
-        if self._target is not None:
-            raise ValueError("Pipeline already has a target")
-        self._target = resource
+        last_step.target = bucket
+        self._current_source = bucket  # Becomes source for next transform
+        self._dag = None
         return self
 
     def build(self) -> DAG:
-        """
-        Build the DAG from source, transforms, and target.
-
-        Returns:
-            DAG object
-
-        Raises:
-            ValueError: If source or target not set
-        """
+        """Build DAG from pipeline steps."""
         if self._dag is not None:
             return self._dag
 
-        if self._source is None:
-            raise ValueError("Pipeline must have a source. Use .source(bucket)")
-        if self._target is None:
-            raise ValueError("Pipeline must have a target. Use .target(bucket)")
-        if not self._transforms:
-            raise ValueError("Pipeline must have at least one transform")
+        if not self._steps:
+            raise ValueError("Pipeline has no steps")
 
-        # Build chain of TaskInstances
+        # Validate all steps have targets
+        for i, step in enumerate(self._steps):
+            if step.target is None:
+                raise ValueError(
+                    f"Step {i+1} (transform '{step.task.name}') has no target. "
+                    "Use .to(bucket) after .transform()"
+                )
+
+        # Build TaskInstances
         instances = []
-
-        # First task reads from source
-        first_task = self._transforms[0]
-        first_instance = TaskInstance(
-            task=first_task,
-            inputs={"df": self._source},  # Source provides LazyFrame
-            name=first_task.name
-        )
-        instances.append(first_instance)
-        prev_instance = first_instance
-
-        # Chain subsequent transforms
-        for task in self._transforms[1:]:
+        for step in self._steps:
             instance = TaskInstance(
-                task=task,
-                inputs={"df": prev_instance},  # Previous output
-                name=task.name
+                task=step.task,
+                source=step.source,
+                target=step.target,
+                name=step.task.name
             )
             instances.append(instance)
-            prev_instance = instance
-
-        # Last task writes to target (handled by executor)
-        # Store target on the last instance for executor to use
-        prev_instance.target = self._target
 
         self._dag = DAG(instances)
         return self._dag
@@ -755,10 +626,10 @@ class Pipeline:
         return dag.to_mermaid()
 
     def __repr__(self) -> str:
-        return f"Pipeline(name='{self.name}', transforms={len(self._transforms)})"
+        return f"Pipeline(name='{self.name}', steps={len(self._steps)})"
 ```
 
-### 2. Task and TaskInstance
+### 2. TaskInstance
 
 **File:** `glacier/core/task.py`
 
@@ -767,11 +638,7 @@ import inspect
 from typing import Callable, Any
 
 class Task:
-    """
-    A reusable task definition.
-
-    Created by @executor.task() decorator.
-    """
+    """Reusable task definition (from @executor.task())."""
 
     def __init__(
         self,
@@ -802,54 +669,45 @@ class Task:
 
 class TaskInstance:
     """
-    An instance of a Task in a pipeline with specific inputs.
+    An instance of a Task in a pipeline.
+
+    Represents: source → transform → target
     """
 
     def __init__(
         self,
         task: Task,
-        inputs: dict[str, Any],
+        source: "Bucket",
+        target: "Bucket",
         name: str
     ):
         self.task = task
-        self.inputs = inputs
+        self.source = source
+        self.target = target
         self.name = name
-        self.target = None  # Set by pipeline if this is the last task
-        self.dependencies = self._extract_dependencies()
-
-    def _extract_dependencies(self) -> list["TaskInstance"]:
-        """Extract TaskInstance dependencies from inputs."""
-        deps = []
-        for value in self.inputs.values():
-            if isinstance(value, TaskInstance):
-                deps.append(value)
-        return deps
+        self.dependencies = []  # Set during DAG building
 
     def execute(self, context: "ExecutionContext") -> Any:
-        """Execute this task instance."""
-        resolved_inputs = {}
+        """
+        Execute this task instance.
 
-        for param_name, value in self.inputs.items():
-            if isinstance(value, TaskInstance):
-                # Get output from previous task
-                resolved_inputs[param_name] = context.get_output(value)
-            elif hasattr(value, 'scan'):
-                # It's a storage resource (Bucket) - scan it
-                resolved_inputs[param_name] = value.scan()
-            else:
-                resolved_inputs[param_name] = value
+        1. Read from source (scan as LazyFrame)
+        2. Execute task function
+        3. Write to target (materialize to parquet)
+        """
+        # Read from source
+        df = self.source.scan()
 
         # Execute task
-        result = self.task.func(**resolved_inputs)
+        result = self.task.func(df=df)
 
-        # If this task has a target, write result to it
-        if self.target is not None:
-            result.collect().write_parquet(self.target.get_uri())
+        # Write to target
+        result.collect().write_parquet(self.target.get_uri())
 
         return result
 
     def __repr__(self) -> str:
-        return f"TaskInstance(name='{self.name}', task={self.task.name})"
+        return f"TaskInstance(name='{self.name}', source={self.source}, target={self.target})"
 ```
 
 ### 3. ExecutionResource.task() Decorator
@@ -898,7 +756,7 @@ class ExecutionResource:
             return decorator(func)
 ```
 
-### 4. Storage Resource (Bucket)
+### 4. Bucket (Storage Resource)
 
 **File:** `glacier/resources/bucket.py`
 
@@ -906,9 +764,7 @@ class ExecutionResource:
 import polars as pl
 
 class Bucket:
-    """
-    Storage resource (bucket) for reading/writing data.
-    """
+    """Storage resource for reading/writing data."""
 
     def __init__(
         self,
@@ -923,12 +779,7 @@ class Bucket:
         self.config = config or {}
 
     def scan(self) -> pl.LazyFrame:
-        """
-        Scan the data source as a LazyFrame.
-
-        Returns:
-            LazyFrame for lazy reading
-        """
+        """Scan the data source as a LazyFrame."""
         uri = self.get_uri()
         return pl.scan_parquet(uri)
 
@@ -953,7 +804,17 @@ class DAG:
 
     def __init__(self, instances: list[TaskInstance]):
         self.instances = instances
+        self._build_dependencies()
         self._validate()
+
+    def _build_dependencies(self):
+        """Build dependencies based on source/target relationships."""
+        # Task B depends on Task A if Task B's source == Task A's target
+        for i, instance in enumerate(self.instances):
+            instance.dependencies = []
+            for prev_instance in self.instances[:i]:
+                if prev_instance.target == instance.source:
+                    instance.dependencies.append(prev_instance)
 
     def _validate(self):
         """Validate that graph is acyclic."""
@@ -997,32 +858,22 @@ class DAG:
 
         return result
 
-    def get_stages(self) -> list[list[TaskInstance]]:
-        """Group instances into parallel execution stages."""
-        stages = []
-        remaining = set(self.instances)
-
-        while remaining:
-            stage = []
-            for inst in list(remaining):
-                if all(dep not in remaining for dep in inst.dependencies):
-                    stage.append(inst)
-
-            stages.append(stage)
-            remaining -= set(stage)
-
-        return stages
-
     def to_mermaid(self) -> str:
         """Generate Mermaid diagram."""
-        lines = ["graph TD"]
+        lines = ["graph LR"]
+
         for inst in self.instances:
-            node_id = inst.name.replace(" ", "_")
-            executor_type = getattr(inst.task.executor, 'type', 'unknown')
-            lines.append(f"    {node_id}[\"{inst.name}<br/>({executor_type})\"]")
-            for dep in inst.dependencies:
-                dep_id = dep.name.replace(" ", "_")
-                lines.append(f"    {dep_id} --> {node_id}")
+            # Show: source → task → target
+            source_id = inst.source.path.replace("/", "_").replace(".", "_")
+            task_id = inst.name.replace(" ", "_")
+            target_id = inst.target.path.replace("/", "_").replace(".", "_")
+
+            lines.append(f"    {source_id}[({inst.source.path})]")
+            lines.append(f"    {task_id}[\"{inst.name}<br/>({inst.task.executor.type})\"]")
+            lines.append(f"    {target_id}[({inst.target.path})]")
+            lines.append(f"    {source_id} --> {task_id}")
+            lines.append(f"    {task_id} --> {target_id}")
+
         return "\n".join(lines)
 
     def __repr__(self) -> str:
@@ -1045,24 +896,26 @@ __all__ = ["Provider", "Pipeline"]
 ### Core Pattern
 
 ```python
-# 1. Define resources
-raw_data = provider.bucket(bucket="data", path="input.parquet")
+# 1. Define storage
+raw_data = provider.bucket(bucket="data", path="raw.parquet")
+intermediate = provider.bucket(bucket="data", path="intermediate.parquet")
 output = provider.bucket(bucket="data", path="output.parquet")
 
-# 2. Define tasks with decorators
+# 2. Define tasks
 @local_exec.task()
 def extract(df): ...
 
 @lambda_exec.task()
 def transform(df): ...
 
-# 3. Build pipeline: source → transforms → target
+# 3. Build pipeline: storage → transform → storage
 pipeline = (
     Pipeline(name="etl")
-    .source(raw_data)
-    .transform(extract)
-    .transform(transform)
-    .target(output)
+    .source(raw_data)          # Read from storage
+    .transform(extract)         # Process
+    .to(intermediate)           # Write to storage (EXPLICIT)
+    .transform(transform)       # Read from intermediate
+    .to(output)                 # Write to storage (EXPLICIT)
 )
 
 # 4. Execute
@@ -1071,20 +924,20 @@ result = pipeline.run(mode="local")
 
 ### Benefits
 
-✅ **Clear data flow** - Source → Transforms → Target
-✅ **Simple builder pattern** - `.source().transform().target()`
-✅ **First-class sources and targets** - Storage resources
-✅ **Tasks defined with decorators** - On execution resources
-✅ **Fluent interface** - Natural method chaining
-✅ **No magic** - Explicit and declarative
+✅ **Storage is explicit** - All serialization points visible
+✅ **Matches physical reality** - Executors communicate via storage
+✅ **No hidden costs** - User sees all storage writes
+✅ **Debuggable** - Can inspect intermediate data
+✅ **Clear boundaries** - Every `.to()` is a materialization point
+✅ **Simple pattern** - `.source().transform().to()`
 
 ### Key Classes
 
-- **Pipeline** - Builder with `.source()`, `.transform()`, `.target()`
+- **Pipeline** - Builder with `.source()`, `.transform()`, `.to()`
 - **Task** - Reusable task definition (from decorator)
-- **TaskInstance** - Task with inputs in pipeline
+- **TaskInstance** - Represents source → transform → target
 - **Bucket** - Storage resource (source/target)
-- **DAG** - Directed acyclic graph
+- **DAG** - Dependencies based on source/target relationships
 
 ---
 
