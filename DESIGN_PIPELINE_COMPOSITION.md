@@ -1,6 +1,6 @@
-# Pipeline Composition Design (Explicit & Declarative)
+# Pipeline Composition Design: Builder Pattern
 
-**Status:** Design Document - v2.0
+**Status:** Design Document - v3.0 (Builder Pattern)
 **Date:** 2025-11-06
 **Related:** DESIGN_UX.md
 
@@ -8,111 +8,77 @@
 
 ## Executive Summary
 
-This document defines an **explicit and declarative** pattern for composing pipelines in Glacier. The key principle: **users explicitly build the DAG** - no AST analysis or implicit inference required.
+This document defines a **builder pattern** for composing pipelines in Glacier. The key principle: **pipelines are built using a PipelineBuilder that explicitly manages task creation and dependency tracking**.
 
 **Core Design:**
+- **PipelineBuilder** manages task creation and tracks the DAG
 - **Tasks are objects** that wrap functions (taking and returning LazyFrames)
-- **Pipeline composition is explicit** - dependencies are declared, not inferred
-- **Task calls return Task objects** (or TaskOutput objects) that form the DAG
-- **No static analysis needed** - the DAG is built explicitly by the user
+- **Dependencies are explicit** - passed as Task objects in the `inputs` dict
+- **No static analysis needed** - the builder maintains the DAG structure
 
 ---
 
 ## Table of Contents
 
-1. [Problem with Previous Design](#problem-with-previous-design)
-2. [Design Principles](#design-principles)
-3. [Core Pattern](#core-pattern)
+1. [Design Principles](#design-principles)
+2. [Core Pattern](#core-pattern)
+3. [PipelineBuilder API](#pipelinebuilder-api)
 4. [Task Objects](#task-objects)
-5. [Pipeline Composition](#pipeline-composition)
-6. [Composition Patterns](#composition-patterns)
-7. [Implementation Specification](#implementation-specification)
-
----
-
-## Problem with Previous Design
-
-The previous design required **AST analysis** to infer the DAG from Python code:
-
-```python
-# Previous design - requires AST parsing
-@pipeline(name="etl")
-def etl_pipeline():
-    raw = extract(bucket)      # How do we know extract is a task?
-    result = transform(raw)    # How do we know raw depends on extract?
-    return result              # Parse AST to find calls and dependencies
-```
-
-**Problems:**
-- Complex static analysis required
-- Difficult to handle dynamic logic (loops, conditionals)
-- Magic/implicit behavior
-- Hard to debug
-- Doesn't work with all Python constructs
-
-**What we need:** An explicit, declarative pattern where users tell us the DAG structure directly.
+5. [Composition Patterns](#composition-patterns)
+6. [Implementation Specification](#implementation-specification)
 
 ---
 
 ## Design Principles
 
-### 1. Explicit Over Implicit
+### 1. Builder Pattern
 
-Users explicitly declare task dependencies - no inference:
+The PipelineBuilder is the central object for constructing pipelines:
 
 ```python
-# ✅ Explicit - clear what depends on what
-extract_task = local_exec.task(extract_fn)
-transform_task = lambda_exec.task(transform_fn, inputs=[extract_task])
+@pipeline(name="etl")
+def build_etl():
+    builder = PipelineBuilder()
 
-# ❌ Implicit - requires analysis
-raw = extract(bucket)  # Is this a task call or function call?
-result = transform(raw)  # Does transform depend on extract?
+    # Builder creates and tracks tasks
+    extract = builder.task(extract_fn, executor=local_exec, inputs={"source": raw_data})
+    transform = builder.task(transform_fn, executor=lambda_exec, inputs={"df": extract})
+
+    return builder
 ```
 
 ### 2. Tasks Are Objects
 
-Tasks are first-class objects that:
-- Wrap functions (that take/return LazyFrames)
-- Are bound to execution resources
-- Track their inputs/dependencies
-- Can be composed to form a DAG
+Tasks wrap functions and track their dependencies:
 
 ```python
-# Task object wraps a function
-def extract_fn(source) -> pl.LazyFrame:
-    return source.scan()
-
-# Create Task object bound to executor
-extract = local_exec.task(extract_fn)
-
-# extract is a Task object, not a function
+# extract and transform are Task objects
 assert isinstance(extract, Task)
+assert isinstance(transform, Task)
+
+# Dependencies are explicit
+assert transform.dependencies == [extract]
 ```
 
-### 3. Declarative Composition
+### 3. Explicit Dependencies
 
-Pipelines are built by declaring tasks and their relationships:
+Dependencies declared through the `inputs` dict:
 
 ```python
-@pipeline(name="etl")
-def build_pipeline():
-    # Declare tasks with explicit inputs
-    extract = Task(extract_fn, executor=local_exec, inputs=[raw_data])
-    transform = Task(transform_fn, executor=lambda_exec, inputs=[extract])
-    load = Task(load_fn, executor=local_exec, inputs=[transform, output])
-
-    # Return the DAG (list of tasks or final task)
-    return load
+# transform depends on extract
+transform = builder.task(
+    transform_fn,
+    executor=lambda_exec,
+    inputs={"df": extract}  # ← extract is a Task object
+)
 ```
 
 ### 4. No Magic
 
-Behavior should be obvious and debuggable:
-- Clear what's a task vs a function
-- Clear what depends on what
-- No hidden context tracking
+- Clear task creation via builder
+- Explicit dependency wiring
 - No AST parsing
+- No hidden context tracking
 
 ---
 
@@ -121,7 +87,7 @@ Behavior should be obvious and debuggable:
 ### Complete Example
 
 ```python
-from glacier import Provider, pipeline, Task
+from glacier import Provider, pipeline
 from glacier.config import AwsConfig, LambdaConfig
 import polars as pl
 
@@ -132,7 +98,7 @@ lambda_exec = provider.serverless(config=LambdaConfig(memory=1024))
 raw_data = provider.bucket(bucket="data", path="input.parquet")
 output = provider.bucket(bucket="data", path="output.parquet")
 
-# 2. Define task functions (pure functions: LazyFrame -> LazyFrame)
+# 2. Define task functions (pure: LazyFrame -> LazyFrame)
 def extract_fn(source) -> pl.LazyFrame:
     """Extract data from source."""
     return source.scan()
@@ -145,67 +111,196 @@ def load_fn(df: pl.LazyFrame, destination) -> None:
     """Load data to destination."""
     df.collect().write_parquet(destination.get_uri())
 
-# 3. Build pipeline explicitly
+# 3. Build pipeline using builder pattern
 @pipeline(name="etl")
-def build_etl_pipeline():
+def build_etl():
     """
-    Build the ETL pipeline DAG explicitly.
+    Build the ETL pipeline using PipelineBuilder.
 
-    This function declares tasks and their dependencies.
-    No execution happens here - just DAG construction.
+    The builder:
+    - Creates Task objects
+    - Tracks all tasks
+    - Wires dependencies
+    - Builds the final DAG
     """
-    # Create Task objects with explicit inputs
-    extract = Task(
-        func=extract_fn,
+    # Create builder
+    builder = PipelineBuilder()
+
+    # Add tasks - builder tracks them automatically
+    extract = builder.task(
+        extract_fn,
         executor=local_exec,
         inputs={"source": raw_data},
         name="extract"
     )
 
-    transform = Task(
-        func=transform_fn,
+    transform = builder.task(
+        transform_fn,
         executor=lambda_exec,
         inputs={"df": extract},  # Depends on extract task
         name="transform"
     )
 
-    load = Task(
-        func=load_fn,
+    load = builder.task(
+        load_fn,
         executor=local_exec,
         inputs={"df": transform, "destination": output},  # Depends on transform
         name="load"
     )
 
-    # Return the final task (or list of tasks)
-    return load  # Or: return [extract, transform, load]
+    # Return the builder (or could return final task)
+    return builder
 
 # 4. Execute the pipeline
-pipeline_instance = build_etl_pipeline()
-result = pipeline_instance.run(mode="local")
+etl_pipeline = build_etl()  # Returns PipelineBuilder or Pipeline
+result = etl_pipeline.run(mode="local")
 ```
 
 ### Key Points
 
-1. **Task functions are pure** - just functions that transform data
-2. **Task objects wrap functions** - created with `Task(func, executor, inputs)`
-3. **Inputs are explicit** - dict of `{param_name: value_or_task}`
-4. **Pipeline function builds the DAG** - returns Task or list of Tasks
+1. **PipelineBuilder** is the central orchestrator
+2. **builder.task()** creates Task objects and tracks them
+3. **Tasks reference each other** via `inputs` dict
+4. **Builder maintains the DAG** - knows all tasks and their relationships
 5. **No execution during build** - just DAG construction
-6. **Run happens separately** - `.run(mode="local")` executes the DAG
+6. **Run happens separately** - `.run(mode="local")` executes
+
+---
+
+## PipelineBuilder API
+
+### Core Methods
+
+```python
+class PipelineBuilder:
+    """
+    Builder for constructing Glacier pipelines.
+
+    Manages task creation and dependency tracking.
+    """
+
+    def __init__(self):
+        """Initialize empty builder."""
+        self._tasks: list[Task] = []
+
+    def task(
+        self,
+        func: Callable,
+        executor: ExecutionResource,
+        inputs: dict[str, Any] | None = None,
+        name: str | None = None,
+        **config
+    ) -> Task:
+        """
+        Create a task and add it to the pipeline.
+
+        Args:
+            func: Function to execute (LazyFrame -> LazyFrame)
+            executor: Execution resource (where this runs)
+            inputs: Dict mapping param names to values or Tasks
+            name: Optional task name (defaults to func.__name__)
+            **config: Additional config (timeout, retries, etc.)
+
+        Returns:
+            Task object that can be used as input to other tasks
+
+        Example:
+            extract = builder.task(extract_fn, executor=local_exec, inputs={"source": bucket})
+            transform = builder.task(transform_fn, executor=lambda_exec, inputs={"df": extract})
+        """
+        task = Task(
+            func=func,
+            executor=executor,
+            inputs=inputs or {},
+            name=name,
+            **config
+        )
+        self._tasks.append(task)
+        return task
+
+    def build(self) -> DAG:
+        """
+        Build the final DAG from all tasks.
+
+        Returns:
+            DAG object with all tasks and their dependencies
+        """
+        return DAG(self._tasks)
+
+    def get_tasks(self) -> list[Task]:
+        """Get all tasks in the pipeline."""
+        return self._tasks.copy()
+```
+
+### Usage Patterns
+
+**Option 1: Return builder**
+
+```python
+@pipeline(name="etl")
+def build_etl():
+    builder = PipelineBuilder()
+
+    extract = builder.task(extract_fn, executor=local_exec, inputs={"source": raw_data})
+    transform = builder.task(transform_fn, executor=lambda_exec, inputs={"df": extract})
+
+    return builder  # Builder tracks all tasks
+```
+
+**Option 2: Return final task**
+
+```python
+@pipeline(name="etl")
+def build_etl():
+    builder = PipelineBuilder()
+
+    extract = builder.task(extract_fn, executor=local_exec, inputs={"source": raw_data})
+    transform = builder.task(transform_fn, executor=lambda_exec, inputs={"df": extract})
+
+    return transform  # Builder inferred from task
+```
+
+**Option 3: Explicit build()**
+
+```python
+@pipeline(name="etl")
+def build_etl():
+    builder = PipelineBuilder()
+
+    extract = builder.task(extract_fn, executor=local_exec, inputs={"source": raw_data})
+    transform = builder.task(transform_fn, executor=lambda_exec, inputs={"df": extract})
+
+    return builder.build()  # Returns DAG directly
+```
+
+### Alternative: Provided Builder
+
+The decorator could provide the builder:
+
+```python
+@pipeline(name="etl")
+def build_etl(p):  # p is PipelineBuilder
+    """Pipeline function receives builder as parameter."""
+    extract = p.task(extract_fn, executor=local_exec, inputs={"source": raw_data})
+    transform = p.task(transform_fn, executor=lambda_exec, inputs={"df": extract})
+    # No need to return - builder is managed by decorator
+```
+
+**Recommendation:** Use Option 1 (return builder) for explicitness and flexibility.
 
 ---
 
 ## Task Objects
 
-### Task Class Design
+### Task Class
 
 ```python
 class Task:
     """
     A task in a Glacier pipeline.
 
-    Tasks wrap functions and bind them to execution resources.
-    They track inputs (dependencies) to form the DAG.
+    Tasks wrap functions and track dependencies.
+    Created by PipelineBuilder, not directly by users.
     """
 
     def __init__(
@@ -214,147 +309,585 @@ class Task:
         executor: ExecutionResource,
         inputs: dict[str, Any] | None = None,
         name: str | None = None,
-        **config
+        timeout: int | None = None,
+        retries: int = 0,
+        cache: bool = False,
+        **kwargs
     ):
         """
         Create a Task.
 
+        Typically called by PipelineBuilder.task(), not directly.
+
         Args:
-            func: Function to execute (takes LazyFrames, returns LazyFrame)
-            executor: Execution resource (where this runs)
-            inputs: Dict mapping param names to values or other Tasks
-            name: Optional task name (defaults to func.__name__)
-            **config: Additional config (timeout, retries, etc.)
+            func: Function to execute
+            executor: Execution resource
+            inputs: Dict mapping param names to values or Tasks
+            name: Task name
+            timeout: Task timeout in seconds
+            retries: Number of retries on failure
+            cache: Enable result caching
+            **kwargs: Additional config
         """
         self.func = func
         self.executor = executor
         self.inputs = inputs or {}
         self.name = name or func.__name__
-        self.config = config
+        self.timeout = timeout
+        self.retries = retries
+        self.cache = cache
+        self.config = kwargs
 
-        # Extracted at init
+        # Extract dependencies from inputs
         self.dependencies = self._extract_dependencies()
 
-    def _extract_dependencies(self) -> list[Task]:
+    def _extract_dependencies(self) -> list["Task"]:
         """Extract upstream Task dependencies from inputs."""
         deps = []
         for value in self.inputs.values():
             if isinstance(value, Task):
                 deps.append(value)
+            elif isinstance(value, TaskOutput):
+                deps.append(value.task)
+            elif isinstance(value, (list, tuple)):
+                # Handle lists/tuples of tasks
+                for v in value:
+                    if isinstance(v, Task):
+                        deps.append(v)
+                    elif isinstance(v, TaskOutput):
+                        deps.append(v.task)
         return deps
 
-    def execute(self, context: ExecutionContext) -> Any:
+    def execute(self, context: "ExecutionContext") -> Any:
         """
-        Execute this task.
+        Execute this task with resolved inputs.
 
         Args:
-            context: Execution context with resolved input values
+            context: Execution context with task outputs
 
         Returns:
             Result of executing the function
         """
-        # Resolve inputs (replace Task objects with their outputs)
+        # Resolve inputs (replace Tasks with their outputs)
         resolved_inputs = {}
+
         for param_name, value in self.inputs.items():
             if isinstance(value, Task):
-                # Get the output of the upstream task from context
                 resolved_inputs[param_name] = context.get_output(value)
+            elif isinstance(value, TaskOutput):
+                resolved_inputs[param_name] = value.resolve(context)
+            elif isinstance(value, (list, tuple)):
+                # Handle lists/tuples of tasks
+                resolved_inputs[param_name] = [
+                    context.get_output(v) if isinstance(v, Task)
+                    else v.resolve(context) if isinstance(v, TaskOutput)
+                    else v
+                    for v in value
+                ]
             else:
-                # Use the value directly (e.g., storage resource)
+                # Use value directly (e.g., storage resource)
                 resolved_inputs[param_name] = value
 
-        # Execute the function
+        # Execute function
         return self.func(**resolved_inputs)
+
+    def output(self, index: int = 0) -> "TaskOutput":
+        """
+        Get a specific output from this task (for multi-output tasks).
+
+        Args:
+            index: Output index (0, 1, 2, ...)
+
+        Returns:
+            TaskOutput that can be used as input to other tasks
+
+        Example:
+            split = builder.task(split_fn, ...)
+            train_task = builder.task(train_fn, inputs={"data": split.output(0)})
+            test_task = builder.task(test_fn, inputs={"data": split.output(1)})
+        """
+        return TaskOutput(task=self, index=index)
+
+    def __getitem__(self, key: str | int) -> "TaskOutput":
+        """Support task[0] or task["name"] syntax."""
+        if isinstance(key, int):
+            return self.output(key)
+        return TaskOutput(task=self, key=key)
 
     def __repr__(self) -> str:
         deps = [t.name for t in self.dependencies]
         return f"Task(name='{self.name}', executor={self.executor}, deps={deps})"
-```
 
-### Creating Tasks
 
-**Option 1: Direct instantiation**
+class TaskOutput:
+    """
+    Represents a specific output from a multi-output task.
 
-```python
-extract = Task(
-    func=extract_fn,
-    executor=local_exec,
-    inputs={"source": raw_data},
-    name="extract"
-)
-```
+    Used when a task returns multiple values (tuple) and you need
+    to reference a specific one.
+    """
 
-**Option 2: Via executor (convenience method)**
+    def __init__(
+        self,
+        task: Task,
+        index: int | None = None,
+        key: str | None = None
+    ):
+        self.task = task
+        self.index = index
+        self.key = key
 
-```python
-@local_exec.task(inputs={"source": raw_data})
-def extract(source) -> pl.LazyFrame:
-    return source.scan()
+    def resolve(self, context: "ExecutionContext") -> Any:
+        """Resolve this output from execution context."""
+        result = context.get_output(self.task)
 
-# extract is now a Task object
-```
+        if self.index is not None:
+            return result[self.index]
+        elif self.key is not None:
+            return result[self.key]
+        else:
+            return result
 
-**Option 3: Separate definition and binding**
-
-```python
-# Define function
-def extract_fn(source) -> pl.LazyFrame:
-    return source.scan()
-
-# Create task later
-extract = local_exec.task(extract_fn, inputs={"source": raw_data})
+    def __repr__(self) -> str:
+        if self.index is not None:
+            return f"TaskOutput({self.task.name}[{self.index}])"
+        elif self.key is not None:
+            return f"TaskOutput({self.task.name}['{self.key}'])"
+        return f"TaskOutput({self.task.name})"
 ```
 
 ---
 
-## Pipeline Composition
+## Composition Patterns
 
-### Pipeline Function
-
-The pipeline function is a **builder** that constructs the DAG:
+### 1. Sequential Pipeline
 
 ```python
-@pipeline(name="etl")
-def build_pipeline():
-    """
-    Build the pipeline DAG.
+@pipeline(name="sequential")
+def build_sequential():
+    """Linear chain of tasks."""
+    builder = PipelineBuilder()
 
-    This function:
-    1. Creates Task objects
-    2. Wires them together via inputs
-    3. Returns the task graph
+    task1 = builder.task(fn1, executor=local_exec, inputs={"source": raw_data})
+    task2 = builder.task(fn2, executor=lambda_exec, inputs={"df": task1})
+    task3 = builder.task(fn3, executor=local_exec, inputs={"df": task2})
 
-    No execution happens here - just DAG construction.
-    """
-    task1 = Task(fn1, executor=exec1, inputs={...})
-    task2 = Task(fn2, executor=exec2, inputs={"data": task1})
-    task3 = Task(fn3, executor=exec3, inputs={"data": task2})
+    return builder
 
-    return task3  # or return [task1, task2, task3]
+# DAG: task1 -> task2 -> task3
 ```
 
-### Pipeline Object
+### 2. Parallel Pipeline (Fan-Out)
 
 ```python
+@pipeline(name="parallel")
+def build_parallel():
+    """Multiple tasks depend on same input - can run in parallel."""
+    builder = PipelineBuilder()
+
+    extract = builder.task(extract_fn, executor=local_exec, inputs={"source": raw_data})
+
+    # All three depend on extract - can run in parallel
+    stats = builder.task(stats_fn, executor=lambda_exec, inputs={"df": extract})
+    features = builder.task(features_fn, executor=lambda_exec, inputs={"df": extract})
+    validation = builder.task(validate_fn, executor=lambda_exec, inputs={"df": extract})
+
+    # Wait for all three
+    report = builder.task(
+        report_fn,
+        executor=local_exec,
+        inputs={"stats": stats, "features": features, "validation": validation}
+    )
+
+    return builder
+
+# DAG:
+#           -> stats ------\
+#          /                \
+# extract --> features ----> report
+#          \                /
+#           -> validation -/
+
+# Execution stages:
+# Stage 1: [extract]
+# Stage 2: [stats, features, validation]  ← parallel
+# Stage 3: [report]
+```
+
+### 3. Join Pipeline (Fan-In)
+
+```python
+@pipeline(name="join")
+def build_join():
+    """Multiple independent tasks join into one."""
+    builder = PipelineBuilder()
+
+    # Three independent extracts
+    sales = builder.task(load_sales_fn, executor=local_exec, inputs={"source": sales_bucket})
+    customers = builder.task(load_customers_fn, executor=local_exec, inputs={"source": customer_bucket})
+    products = builder.task(load_products_fn, executor=local_exec, inputs={"source": product_bucket})
+
+    # Join all three
+    joined = builder.task(
+        join_fn,
+        executor=spark_exec,
+        inputs={"sales": sales, "customers": customers, "products": products}
+    )
+
+    return builder
+
+# DAG:
+# load_sales -----\
+# load_customers --> join
+# load_products --/
+
+# Execution stages:
+# Stage 1: [load_sales, load_customers, load_products]  ← parallel
+# Stage 2: [join]
+```
+
+### 4. Diamond Pipeline
+
+```python
+@pipeline(name="diamond")
+def build_diamond():
+    """Fork and join pattern."""
+    builder = PipelineBuilder()
+
+    extract = builder.task(extract_fn, executor=local_exec, inputs={"source": raw_data})
+
+    # Fork - two parallel branches
+    branch1 = builder.task(transform1_fn, executor=lambda_exec, inputs={"df": extract})
+    branch2 = builder.task(transform2_fn, executor=lambda_exec, inputs={"df": extract})
+
+    # Join - merge both branches
+    merged = builder.task(
+        merge_fn,
+        executor=local_exec,
+        inputs={"df1": branch1, "df2": branch2}
+    )
+
+    return builder
+
+# DAG:
+#         -> branch1 --\
+#        /              \
+# extract               -> merged
+#        \              /
+#         -> branch2 --/
+```
+
+### 5. Multi-Output Tasks
+
+```python
+def split_fn(df: pl.LazyFrame) -> tuple[pl.LazyFrame, pl.LazyFrame]:
+    """Split data into train and test sets."""
+    train = df.filter(pl.col("split") == "train")
+    test = df.filter(pl.col("split") == "test")
+    return train, test
+
+@pipeline(name="ml")
+def build_ml_pipeline():
+    """Pipeline with multi-output task."""
+    builder = PipelineBuilder()
+
+    load = builder.task(load_fn, executor=local_exec, inputs={"source": data})
+
+    # Task produces tuple of outputs
+    split = builder.task(split_fn, executor=local_exec, inputs={"df": load})
+
+    # Use specific outputs
+    train_model = builder.task(
+        train_fn,
+        executor=databricks_exec,
+        inputs={"data": split.output(0)}  # First output (train)
+    )
+
+    evaluate = builder.task(
+        eval_fn,
+        executor=local_exec,
+        inputs={
+            "model": train_model,
+            "test_data": split.output(1)  # Second output (test)
+        }
+    )
+
+    return builder
+```
+
+### 6. Conditional Logic
+
+```python
+@pipeline(name="conditional")
+def build_conditional(mode: str):
+    """Different pipeline based on mode parameter."""
+    builder = PipelineBuilder()
+
+    extract = builder.task(extract_fn, executor=local_exec, inputs={"source": raw_data})
+
+    # Conditional task creation
+    if mode == "full":
+        transform = builder.task(
+            full_transform_fn,
+            executor=spark_exec,
+            inputs={"df": extract}
+        )
+    else:
+        transform = builder.task(
+            quick_transform_fn,
+            executor=lambda_exec,
+            inputs={"df": extract}
+        )
+
+    load = builder.task(load_fn, executor=local_exec, inputs={"df": transform})
+
+    return builder
+```
+
+### 7. Dynamic Task Generation
+
+```python
+@pipeline(name="dynamic")
+def build_dynamic(files: list[str]):
+    """Process multiple files in parallel."""
+    builder = PipelineBuilder()
+
+    # Create a task for each file
+    process_tasks = []
+    for i, file_path in enumerate(files):
+        task = builder.task(
+            process_file_fn,
+            executor=lambda_exec,
+            inputs={"file_path": file_path},
+            name=f"process_file_{i}"
+        )
+        process_tasks.append(task)
+
+    # Combine all results
+    combine = builder.task(
+        combine_fn,
+        executor=local_exec,
+        inputs={"results": process_tasks}  # List of tasks
+    )
+
+    return builder
+
+# DAG (for 3 files):
+# process_file_0 --\
+# process_file_1 --> combine
+# process_file_2 --/
+
+# All process_file tasks can run in parallel
+```
+
+### 8. Complex Multi-Stage Pipeline
+
+```python
+@pipeline(name="complex_etl")
+def build_complex_etl():
+    """Complex pipeline with multiple stages and patterns."""
+    builder = PipelineBuilder()
+
+    # Stage 1: Parallel extracts
+    raw_sales = builder.task(extract_sales_fn, executor=local_exec, inputs={"source": sales_bucket})
+    raw_customers = builder.task(extract_customers_fn, executor=local_exec, inputs={"source": customer_bucket})
+
+    # Stage 2: Independent cleaning (parallel)
+    clean_sales = builder.task(clean_sales_fn, executor=lambda_exec, inputs={"df": raw_sales})
+    clean_customers = builder.task(clean_customers_fn, executor=lambda_exec, inputs={"df": raw_customers})
+
+    # Stage 3: Join
+    joined = builder.task(
+        join_fn,
+        executor=spark_exec,
+        inputs={"sales": clean_sales, "customers": clean_customers}
+    )
+
+    # Stage 4: Parallel transformations
+    aggregates = builder.task(aggregate_fn, executor=spark_exec, inputs={"df": joined})
+    features = builder.task(feature_fn, executor=spark_exec, inputs={"df": joined})
+
+    # Stage 5: ML inference
+    predictions = builder.task(
+        ml_predict_fn,
+        executor=databricks_exec,
+        inputs={"data": joined, "aggs": aggregates, "features": features}
+    )
+
+    # Stage 6: Save
+    save = builder.task(
+        save_fn,
+        executor=local_exec,
+        inputs={"df": predictions, "dest": output_bucket}
+    )
+
+    return builder
+
+# DAG automatically determines execution stages:
+# Stage 1: [extract_sales, extract_customers]
+# Stage 2: [clean_sales, clean_customers]
+# Stage 3: [join]
+# Stage 4: [aggregates, features]
+# Stage 5: [ml_predict]
+# Stage 6: [save]
+```
+
+---
+
+## Implementation Specification
+
+### 1. PipelineBuilder Class
+
+**File:** `glacier/core/builder.py`
+
+```python
+from typing import Callable, Any
+from glacier.core.task import Task
+from glacier.core.dag import DAG
+
+class PipelineBuilder:
+    """
+    Builder for constructing Glacier pipelines.
+
+    Manages task creation and tracks the DAG structure.
+    """
+
+    def __init__(self):
+        """Initialize an empty builder."""
+        self._tasks: list[Task] = []
+
+    def task(
+        self,
+        func: Callable,
+        executor: "ExecutionResource",
+        inputs: dict[str, Any] | None = None,
+        name: str | None = None,
+        **config
+    ) -> Task:
+        """
+        Create a task and add it to the pipeline.
+
+        Args:
+            func: Function to execute (LazyFrame -> LazyFrame)
+            executor: Execution resource (where this runs)
+            inputs: Dict mapping param names to values or Tasks
+            name: Optional task name (defaults to func.__name__)
+            **config: Additional config (timeout, retries, etc.)
+
+        Returns:
+            Task object that can be used as input to other tasks
+        """
+        task_obj = Task(
+            func=func,
+            executor=executor,
+            inputs=inputs or {},
+            name=name,
+            **config
+        )
+        self._tasks.append(task_obj)
+        return task_obj
+
+    def build(self) -> DAG:
+        """
+        Build the final DAG from all tasks.
+
+        Returns:
+            DAG object with all tasks and their dependencies
+        """
+        if not self._tasks:
+            raise ValueError("Pipeline has no tasks")
+
+        return DAG(self._tasks)
+
+    def get_tasks(self) -> list[Task]:
+        """Get all tasks in the pipeline."""
+        return self._tasks.copy()
+
+    def visualize(self) -> str:
+        """Generate a Mermaid visualization of the pipeline."""
+        dag = self.build()
+        return dag.to_mermaid()
+
+    def __repr__(self) -> str:
+        return f"PipelineBuilder(tasks={len(self._tasks)})"
+```
+
+### 2. Pipeline Decorator
+
+**File:** `glacier/core/pipeline.py`
+
+```python
+from typing import Callable, Any
+from functools import wraps
+import inspect
+from glacier.core.builder import PipelineBuilder
+from glacier.core.task import Task
+from glacier.core.dag import DAG
+
+def pipeline(name: str, description: str | None = None, **config) -> Callable:
+    """
+    Decorator for defining pipelines.
+
+    The decorated function should:
+    1. Create a PipelineBuilder
+    2. Use builder.task() to create tasks
+    3. Return the builder
+
+    Usage:
+        @pipeline(name="etl")
+        def build_etl():
+            builder = PipelineBuilder()
+            extract = builder.task(extract_fn, executor=local_exec, inputs={...})
+            transform = builder.task(transform_fn, executor=lambda_exec, inputs={"df": extract})
+            return builder
+
+    Args:
+        name: Pipeline name
+        description: Optional description
+        **config: Additional configuration
+
+    Returns:
+        Pipeline object
+    """
+    def decorator(func: Callable) -> "Pipeline":
+        return Pipeline(
+            name=name,
+            builder_func=func,
+            description=description,
+            config=config
+        )
+
+    return decorator
+
+
 class Pipeline:
     """
-    A Glacier pipeline.
+    A Glacier pipeline - a DAG of tasks.
 
-    Represents a DAG of tasks that can be executed, analyzed,
-    or used to generate infrastructure.
+    Created by the @pipeline decorator.
     """
 
-    def __init__(self, name: str, builder: Callable):
+    def __init__(
+        self,
+        name: str,
+        builder_func: Callable,
+        description: str | None = None,
+        config: dict | None = None
+    ):
         """
         Create a Pipeline.
 
         Args:
             name: Pipeline name
-            builder: Function that builds the task DAG
+            builder_func: Function that builds the pipeline
+            description: Optional description
+            config: Optional configuration
         """
         self.name = name
-        self.builder = builder
-        self._dag = None
+        self.builder_func = builder_func
+        self.description = description or inspect.getdoc(builder_func)
+        self.config = config or {}
+        self._dag: DAG | None = None
 
     def build(self) -> DAG:
         """
@@ -363,19 +896,30 @@ class Pipeline:
         Returns:
             DAG object with all tasks and dependencies
         """
-        if self._dag is None:
-            # Call the builder function
-            result = self.builder()
+        if self._dag is not None:
+            return self._dag
 
-            # Convert result to DAG
-            if isinstance(result, Task):
-                # Single task - traverse backwards to get all tasks
-                self._dag = DAG.from_task(result)
-            elif isinstance(result, list):
-                # List of tasks
-                self._dag = DAG.from_tasks(result)
-            else:
-                raise ValueError(f"Pipeline must return Task or list[Task], got {type(result)}")
+        # Call the builder function
+        result = self.builder_func()
+
+        # Handle different return types
+        if isinstance(result, PipelineBuilder):
+            # Builder was returned - build DAG from it
+            self._dag = result.build()
+        elif isinstance(result, Task):
+            # Task was returned - build DAG from it
+            self._dag = DAG.from_task(result)
+        elif isinstance(result, DAG):
+            # DAG was returned directly
+            self._dag = result
+        elif isinstance(result, list) and all(isinstance(t, Task) for t in result):
+            # List of tasks
+            self._dag = DAG.from_tasks(result)
+        else:
+            raise ValueError(
+                f"Pipeline builder must return PipelineBuilder, Task, DAG, or list[Task]. "
+                f"Got {type(result)}"
+            )
 
         return self._dag
 
@@ -390,31 +934,57 @@ class Pipeline:
         Returns:
             Execution result (mode-dependent)
         """
-        # Build DAG
         dag = self.build()
 
-        # Execute based on mode
         if mode == "local":
-            return self._run_local(dag, **kwargs)
+            from glacier.runtime.local import LocalExecutor
+            executor = LocalExecutor(dag)
+            return executor.execute(**kwargs)
+
         elif mode == "cloud":
-            return self._run_cloud(dag, **kwargs)
+            from glacier.runtime.cloud import CloudExecutor
+            executor = CloudExecutor(dag)
+            return executor.execute(**kwargs)
+
         elif mode == "analyze":
-            return self._analyze(dag, **kwargs)
+            from glacier.codegen.analyzer import PipelineAnalysis
+            return PipelineAnalysis(dag)
+
         elif mode == "generate":
-            return self._generate(dag, **kwargs)
+            from glacier.codegen.terraform import TerraformGenerator
+            generator = TerraformGenerator(dag)
+            return generator.generate(**kwargs)
+
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
-    def _run_local(self, dag: DAG, **kwargs) -> Any:
-        """Execute all tasks locally in topological order."""
-        from glacier.runtime.local import LocalExecutor
-        executor = LocalExecutor(dag)
-        return executor.execute(**kwargs)
+    def visualize(self) -> str:
+        """Generate a visualization of the pipeline."""
+        dag = self.build()
+        return dag.to_mermaid()
+
+    def __repr__(self) -> str:
+        return f"Pipeline(name='{self.name}')"
+
+    def __call__(self, *args, **kwargs):
+        """Allow calling pipeline as a function."""
+        return self.run(*args, **kwargs)
 ```
 
-### DAG Object
+### 3. Task Class (Updated)
+
+**File:** `glacier/core/task.py`
+
+Already defined in previous section - no changes needed.
+
+### 4. DAG Class (Updated)
+
+**File:** `glacier/core/dag.py`
 
 ```python
+from typing import Any
+from glacier.core.task import Task
+
 class DAG:
     """
     Directed Acyclic Graph of tasks.
@@ -423,11 +993,17 @@ class DAG:
     """
 
     def __init__(self, tasks: list[Task]):
+        """
+        Create a DAG from a list of tasks.
+
+        Args:
+            tasks: List of all tasks in the pipeline
+        """
         self.tasks = tasks
         self._validate()
 
     @classmethod
-    def from_task(cls, final_task: Task) -> 'DAG':
+    def from_task(cls, final_task: Task) -> "DAG":
         """
         Build DAG by traversing backwards from final task.
 
@@ -445,8 +1021,6 @@ class DAG:
                 return
             visited.add(task)
             tasks.append(task)
-
-            # Traverse dependencies
             for dep in task.dependencies:
                 traverse(dep)
 
@@ -454,13 +1028,28 @@ class DAG:
         return cls(tasks)
 
     @classmethod
-    def from_tasks(cls, tasks: list[Task]) -> 'DAG':
-        """Build DAG from explicit list of tasks."""
-        return cls(tasks)
+    def from_tasks(cls, tasks: list[Task]) -> "DAG":
+        """
+        Build DAG from explicit list of tasks.
+
+        Collects all tasks and their transitive dependencies.
+        """
+        all_tasks = set()
+
+        def collect(task: Task):
+            if task in all_tasks:
+                return
+            all_tasks.add(task)
+            for dep in task.dependencies:
+                collect(dep)
+
+        for task in tasks:
+            collect(task)
+
+        return cls(list(all_tasks))
 
     def _validate(self):
         """Validate that the graph is acyclic."""
-        # Check for cycles using DFS
         visited = set()
         rec_stack = set()
 
@@ -488,7 +1077,7 @@ class DAG:
         Return tasks in execution order (topologically sorted).
 
         Returns:
-            List of tasks in order such that all dependencies come before dependents
+            List of tasks in order where dependencies come before dependents
         """
         # Kahn's algorithm
         in_degree = {task: len(task.dependencies) for task in self.tasks}
@@ -513,7 +1102,7 @@ class DAG:
 
     def get_stages(self) -> list[list[Task]]:
         """
-        Group tasks into execution stages.
+        Group tasks into execution stages for parallel execution.
 
         Tasks in the same stage have no dependencies on each other
         and can be executed in parallel.
@@ -538,670 +1127,77 @@ class DAG:
             remaining -= set(stage)
 
         return stages
-```
-
----
-
-## Composition Patterns
-
-### 1. Sequential Pipeline
-
-```python
-@pipeline(name="sequential")
-def build_sequential():
-    """Linear chain of tasks."""
-    task1 = Task(fn1, executor=local_exec, inputs={"source": raw_data})
-    task2 = Task(fn2, executor=lambda_exec, inputs={"df": task1})
-    task3 = Task(fn3, executor=local_exec, inputs={"df": task2})
-    return task3
-
-# DAG: task1 -> task2 -> task3
-```
-
-### 2. Parallel Pipeline (Fan-Out)
-
-```python
-@pipeline(name="parallel")
-def build_parallel():
-    """Multiple tasks depend on same input."""
-    extract = Task(extract_fn, executor=local_exec, inputs={"source": raw_data})
-
-    # All three depend on extract, can run in parallel
-    stats = Task(stats_fn, executor=lambda_exec, inputs={"df": extract})
-    features = Task(features_fn, executor=lambda_exec, inputs={"df": extract})
-    validation = Task(validate_fn, executor=lambda_exec, inputs={"df": extract})
-
-    # Wait for all three
-    report = Task(
-        report_fn,
-        executor=local_exec,
-        inputs={"stats": stats, "features": features, "validation": validation}
-    )
-
-    return report
-
-# DAG:
-#           -> stats ------\
-#          /                \
-# extract --> features ----> report
-#          \                /
-#           -> validation -/
-```
-
-### 3. Join Pipeline (Fan-In)
-
-```python
-@pipeline(name="join")
-def build_join():
-    """Multiple inputs to one task."""
-    sales = Task(load_sales_fn, executor=local_exec, inputs={"source": sales_bucket})
-    customers = Task(load_customers_fn, executor=local_exec, inputs={"source": customer_bucket})
-    products = Task(load_products_fn, executor=local_exec, inputs={"source": product_bucket})
-
-    # Join all three
-    joined = Task(
-        join_fn,
-        executor=spark_exec,
-        inputs={"sales": sales, "customers": customers, "products": products}
-    )
-
-    return joined
-
-# DAG:
-# load_sales -----\
-# load_customers --> join
-# load_products --/
-```
-
-### 4. Diamond Pipeline
-
-```python
-@pipeline(name="diamond")
-def build_diamond():
-    """Fork and join pattern."""
-    extract = Task(extract_fn, executor=local_exec, inputs={"source": raw_data})
-
-    # Fork
-    branch1 = Task(transform1_fn, executor=lambda_exec, inputs={"df": extract})
-    branch2 = Task(transform2_fn, executor=lambda_exec, inputs={"df": extract})
-
-    # Join
-    merged = Task(
-        merge_fn,
-        executor=local_exec,
-        inputs={"df1": branch1, "df2": branch2}
-    )
-
-    return merged
-
-# DAG:
-#         -> branch1 --\
-#        /              \
-# extract               -> merged
-#        \              /
-#         -> branch2 --/
-```
-
-### 5. Multi-Output Tasks
-
-For tasks that produce multiple outputs, use a wrapper:
-
-```python
-def split_data_fn(df: pl.LazyFrame) -> tuple[pl.LazyFrame, pl.LazyFrame]:
-    """Split into train and test."""
-    train = df.filter(pl.col("split") == "train")
-    test = df.filter(pl.col("split") == "test")
-    return train, test
-
-@pipeline(name="ml")
-def build_ml_pipeline():
-    load = Task(load_fn, executor=local_exec, inputs={"source": data})
-
-    # Task that produces multiple outputs
-    split = Task(split_data_fn, executor=local_exec, inputs={"df": load})
-
-    # Access outputs by index or attribute
-    train_model = Task(
-        train_fn,
-        executor=databricks_exec,
-        inputs={"df": split.output(0)}  # or split["train"]
-    )
-
-    evaluate = Task(
-        eval_fn,
-        executor=local_exec,
-        inputs={"model": train_model, "test_df": split.output(1)}  # or split["test"]
-    )
-
-    return evaluate
-```
-
-### 6. Conditional Logic
-
-Use Python conditionals in the builder:
-
-```python
-@pipeline(name="conditional")
-def build_conditional(mode: str):
-    """Different pipeline structure based on mode."""
-    extract = Task(extract_fn, executor=local_exec, inputs={"source": raw_data})
-
-    if mode == "full":
-        transform = Task(full_transform_fn, executor=spark_exec, inputs={"df": extract})
-    else:
-        transform = Task(quick_transform_fn, executor=lambda_exec, inputs={"df": extract})
-
-    load = Task(load_fn, executor=local_exec, inputs={"df": transform})
-    return load
-```
-
-### 7. Dynamic Task Generation
-
-Generate tasks in loops:
-
-```python
-@pipeline(name="dynamic")
-def build_dynamic(file_list: list[str]):
-    """Process multiple files in parallel."""
-    # Load task
-    load = Task(list_files_fn, executor=local_exec, inputs={"bucket": data_bucket})
-
-    # Create a task for each file
-    process_tasks = []
-    for i, file_path in enumerate(file_list):
-        task = Task(
-            process_file_fn,
-            executor=lambda_exec,
-            inputs={"file_path": file_path},
-            name=f"process_{i}"
-        )
-        process_tasks.append(task)
-
-    # Combine results
-    combine = Task(
-        combine_fn,
-        executor=local_exec,
-        inputs={"results": process_tasks}  # List of tasks as input
-    )
-
-    return combine
-```
-
----
-
-## Implementation Specification
-
-### 1. Task Class
-
-**File:** `glacier/core/task.py`
-
-```python
-from typing import Callable, Any
-from dataclasses import dataclass
-
-class Task:
-    """
-    A task in a Glacier pipeline.
-
-    Tasks wrap functions and track dependencies to form a DAG.
-    """
-
-    def __init__(
-        self,
-        func: Callable,
-        executor: "ExecutionResource",
-        inputs: dict[str, Any] | None = None,
-        name: str | None = None,
-        timeout: int | None = None,
-        retries: int = 0,
-        cache: bool = False,
-        **kwargs
-    ):
-        self.func = func
-        self.executor = executor
-        self.inputs = inputs or {}
-        self.name = name or func.__name__
-        self.timeout = timeout
-        self.retries = retries
-        self.cache = cache
-        self.config = kwargs
-
-        # Extract dependencies
-        self.dependencies = self._extract_dependencies()
-
-        # Store signature for validation
-        self.signature = inspect.signature(func)
-
-    def _extract_dependencies(self) -> list["Task"]:
-        """Extract upstream Task dependencies from inputs."""
-        deps = []
-        for value in self.inputs.values():
-            if isinstance(value, Task):
-                deps.append(value)
-            elif isinstance(value, (list, tuple)):
-                # Handle list/tuple of tasks
-                deps.extend(v for v in value if isinstance(v, Task))
-        return deps
-
-    def execute(self, context: "ExecutionContext") -> Any:
-        """Execute this task with resolved inputs."""
-        resolved_inputs = {}
-
-        for param_name, value in self.inputs.items():
-            if isinstance(value, Task):
-                # Get upstream task output
-                resolved_inputs[param_name] = context.get_output(value)
-            elif isinstance(value, (list, tuple)):
-                # Handle lists of tasks
-                resolved_inputs[param_name] = [
-                    context.get_output(v) if isinstance(v, Task) else v
-                    for v in value
-                ]
-            else:
-                # Use value directly
-                resolved_inputs[param_name] = value
-
-        # Execute function
-        return self.func(**resolved_inputs)
-
-    def output(self, index: int = 0) -> "TaskOutput":
-        """
-        Get a specific output from this task (for multi-output tasks).
-
-        Args:
-            index: Output index (0 for first output, 1 for second, etc.)
-
-        Returns:
-            TaskOutput object that can be used as input to other tasks
-        """
-        return TaskOutput(task=self, index=index)
-
-    def __getitem__(self, key: str | int) -> "TaskOutput":
-        """Support task["output_name"] or task[0] syntax."""
-        if isinstance(key, int):
-            return self.output(key)
-        return TaskOutput(task=self, key=key)
-
-    def __repr__(self) -> str:
-        deps = [t.name for t in self.dependencies]
-        return f"Task(name='{self.name}', executor={self.executor.type}, deps={deps})"
-
-
-@dataclass
-class TaskOutput:
-    """
-    Represents a specific output from a task.
-
-    Used when a task produces multiple outputs and you need to
-    reference a specific one.
-    """
-    task: Task
-    index: int | None = None
-    key: str | None = None
-
-    def resolve(self, context: "ExecutionContext") -> Any:
-        """Resolve this output from the execution context."""
-        result = context.get_output(self.task)
-
-        if self.index is not None:
-            return result[self.index]
-        elif self.key is not None:
-            return result[self.key]
-        else:
-            return result
-```
-
-### 2. Pipeline Decorator and Class
-
-**File:** `glacier/core/pipeline.py`
-
-```python
-from typing import Callable
-from functools import wraps
-
-def pipeline(name: str, description: str | None = None, **config) -> Callable:
-    """
-    Decorator for defining pipelines.
-
-    The decorated function should build and return a Task DAG.
-
-    Usage:
-        @pipeline(name="etl")
-        def build_etl():
-            task1 = Task(fn1, ...)
-            task2 = Task(fn2, inputs={"data": task1})
-            return task2
-
-    Args:
-        name: Pipeline name
-        description: Optional description
-        **config: Additional configuration
-
-    Returns:
-        Pipeline object
-    """
-    def decorator(func: Callable) -> Pipeline:
-        return Pipeline(
-            name=name,
-            builder=func,
-            description=description,
-            config=config
-        )
-
-    return decorator
-
-
-class Pipeline:
-    """A Glacier pipeline - a DAG of tasks."""
-
-    def __init__(
-        self,
-        name: str,
-        builder: Callable,
-        description: str | None = None,
-        config: dict | None = None
-    ):
-        self.name = name
-        self.builder = builder
-        self.description = description or inspect.getdoc(builder)
-        self.config = config or {}
-        self._dag = None
-
-    def build(self) -> "DAG":
-        """Build the DAG by calling the builder function."""
-        if self._dag is None:
-            result = self.builder()
-
-            if isinstance(result, Task):
-                self._dag = DAG.from_task(result)
-            elif isinstance(result, list):
-                self._dag = DAG.from_tasks(result)
-            else:
-                raise ValueError(
-                    f"Pipeline builder must return Task or list[Task], got {type(result)}"
-                )
-
-        return self._dag
-
-    def run(self, mode: str = "local", **kwargs) -> Any:
-        """Execute the pipeline."""
-        dag = self.build()
-
-        if mode == "local":
-            from glacier.runtime.local import LocalExecutor
-            executor = LocalExecutor(dag)
-            return executor.execute(**kwargs)
-
-        elif mode == "cloud":
-            from glacier.runtime.cloud import CloudExecutor
-            executor = CloudExecutor(dag)
-            return executor.execute(**kwargs)
-
-        elif mode == "analyze":
-            return PipelineAnalysis(dag)
-
-        elif mode == "generate":
-            from glacier.codegen.terraform import TerraformGenerator
-            generator = TerraformGenerator(dag)
-            return generator.generate(**kwargs)
-
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-
-    def visualize(self) -> str:
-        """Generate a visualization of the pipeline DAG."""
-        dag = self.build()
-        return dag.to_mermaid()
-
-    def __repr__(self) -> str:
-        return f"Pipeline(name='{self.name}')"
-```
-
-### 3. ExecutionResource.task() Method
-
-**File:** `glacier/resources/base.py`
-
-```python
-class ExecutionResource:
-    """Base class for execution resources."""
-
-    def task(
-        self,
-        func: Callable | None = None,
-        *,
-        inputs: dict[str, Any] | None = None,
-        name: str | None = None,
-        **config
-    ) -> Task | Callable:
-        """
-        Create a Task bound to this execution resource.
-
-        Can be used as:
-        1. Decorator: @executor.task(inputs={...})
-        2. Direct call: executor.task(func, inputs={...})
-
-        Args:
-            func: Function to wrap
-            inputs: Dict of inputs (param_name -> value or Task)
-            name: Optional task name
-            **config: Additional config (timeout, retries, etc.)
-
-        Returns:
-            Task object or decorator function
-        """
-        def create_task(f: Callable) -> Task:
-            return Task(
-                func=f,
-                executor=self,
-                inputs=inputs or {},
-                name=name or f.__name__,
-                **config
-            )
-
-        if func is None:
-            # Used as decorator: @executor.task(inputs={...})
-            return create_task
-        else:
-            # Direct call: executor.task(func, inputs={...})
-            return create_task(func)
-```
-
-### 4. DAG Class
-
-**File:** `glacier/core/dag.py`
-
-```python
-class DAG:
-    """Directed Acyclic Graph of tasks."""
-
-    def __init__(self, tasks: list[Task]):
-        self.tasks = tasks
-        self._validate()
-
-    @classmethod
-    def from_task(cls, final_task: Task) -> "DAG":
-        """Build DAG by traversing from final task."""
-        tasks = []
-        visited = set()
-
-        def traverse(task: Task):
-            if task in visited:
-                return
-            visited.add(task)
-            tasks.append(task)
-            for dep in task.dependencies:
-                traverse(dep)
-
-        traverse(final_task)
-        return cls(tasks)
-
-    @classmethod
-    def from_tasks(cls, tasks: list[Task]) -> "DAG":
-        """Build DAG from list of tasks."""
-        # Collect all tasks and their dependencies
-        all_tasks = set()
-
-        def collect(task: Task):
-            if task in all_tasks:
-                return
-            all_tasks.add(task)
-            for dep in task.dependencies:
-                collect(dep)
-
-        for task in tasks:
-            collect(task)
-
-        return cls(list(all_tasks))
-
-    def _validate(self):
-        """Validate that graph is acyclic."""
-        visited = set()
-        rec_stack = set()
-
-        def has_cycle(task: Task) -> bool:
-            visited.add(task)
-            rec_stack.add(task)
-
-            for dep in task.dependencies:
-                if dep not in visited:
-                    if has_cycle(dep):
-                        return True
-                elif dep in rec_stack:
-                    return True
-
-            rec_stack.remove(task)
-            return False
-
-        for task in self.tasks:
-            if task not in visited:
-                if has_cycle(task):
-                    raise ValueError("Pipeline contains a cycle")
-
-    def topological_sort(self) -> list[Task]:
-        """Return tasks in execution order."""
-        in_degree = {task: len(task.dependencies) for task in self.tasks}
-        queue = [task for task in self.tasks if in_degree[task] == 0]
-        result = []
-
-        while queue:
-            task = queue.pop(0)
-            result.append(task)
-
-            for other in self.tasks:
-                if task in other.dependencies:
-                    in_degree[other] -= 1
-                    if in_degree[other] == 0:
-                        queue.append(other)
-
-        return result
-
-    def get_stages(self) -> list[list[Task]]:
-        """Group tasks into parallel execution stages."""
-        stages = []
-        remaining = set(self.tasks)
-
-        while remaining:
-            stage = []
-            for task in list(remaining):
-                if all(dep not in remaining for dep in task.dependencies):
-                    stage.append(task)
-
-            stages.append(stage)
-            remaining -= set(stage)
-
-        return stages
 
     def to_mermaid(self) -> str:
-        """Generate Mermaid diagram."""
+        """Generate Mermaid diagram of the DAG."""
         lines = ["graph TD"]
         for task in self.tasks:
             node_id = task.name.replace(" ", "_")
-            lines.append(f"    {node_id}[\"{task.name}<br/>({task.executor.type})\"]")
+            executor_type = getattr(task.executor, 'type', 'unknown')
+            lines.append(f"    {node_id}[\"{task.name}<br/>({executor_type})\"]")
             for dep in task.dependencies:
                 dep_id = dep.name.replace(" ", "_")
                 lines.append(f"    {dep_id} --> {node_id}")
         return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        return f"DAG(tasks={len(self.tasks)})"
 ```
 
-### 5. Execution Context
-
-**File:** `glacier/runtime/context.py`
-
-```python
-class ExecutionContext:
-    """
-    Context for executing a pipeline.
-
-    Stores task outputs and manages execution state.
-    """
-
-    def __init__(self):
-        self._outputs: dict[Task, Any] = {}
-
-    def set_output(self, task: Task, output: Any):
-        """Store the output of a task."""
-        self._outputs[task] = output
-
-    def get_output(self, task: Task) -> Any:
-        """Get the output of a task."""
-        if task not in self._outputs:
-            raise ValueError(f"Task '{task.name}' has not been executed yet")
-        return self._outputs[task]
-
-    def has_output(self, task: Task) -> bool:
-        """Check if a task has been executed."""
-        return task in self._outputs
-```
-
-### 6. Export from glacier/__init__.py
+### 5. Export from glacier/__init__.py
 
 ```python
 from glacier.providers import Provider
 from glacier.core.pipeline import pipeline
+from glacier.core.builder import PipelineBuilder
 from glacier.core.task import Task
 
-__all__ = ["Provider", "pipeline", "Task"]
+__all__ = ["Provider", "pipeline", "PipelineBuilder", "Task"]
 ```
 
 ---
 
 ## Summary
 
-### Core Principles
-
-1. **Tasks are objects** - wrap functions, track dependencies
-2. **Explicit composition** - users declare the DAG structure
-3. **No AST analysis** - DAG is built from explicit Task objects
-4. **Declarative builders** - pipeline functions construct and return DAGs
-5. **Clear execution model** - build DAG, then execute it
-
-### Usage Pattern
+### Core Pattern
 
 ```python
-# 1. Define functions (pure: LazyFrame -> LazyFrame)
-def extract_fn(source): ...
-def transform_fn(df): ...
+# 1. Define pure functions
+def extract_fn(source) -> pl.LazyFrame: ...
+def transform_fn(df) -> pl.LazyFrame: ...
 
-# 2. Build pipeline - create Task objects with explicit inputs
+# 2. Build pipeline using PipelineBuilder
 @pipeline(name="etl")
 def build_etl():
-    extract = Task(extract_fn, executor=local_exec, inputs={"source": raw_data})
-    transform = Task(transform_fn, executor=lambda_exec, inputs={"df": extract})
-    return transform
+    builder = PipelineBuilder()
+
+    extract = builder.task(extract_fn, executor=local_exec, inputs={"source": raw_data})
+    transform = builder.task(transform_fn, executor=lambda_exec, inputs={"df": extract})
+    load = builder.task(load_fn, executor=local_exec, inputs={"df": transform})
+
+    return builder
 
 # 3. Execute
-result = build_etl().run(mode="local")
+etl = build_etl()
+result = etl.run(mode="local")
 ```
 
 ### Benefits
 
-- ✅ **No magic** - clear what depends on what
-- ✅ **No AST parsing** - explicit DAG construction
-- ✅ **Type safe** - tasks, executors, and inputs are typed
-- ✅ **Debuggable** - can inspect Task objects before execution
-- ✅ **Flexible** - easy to handle conditionals, loops, dynamic tasks
-- ✅ **Analyzable** - DAG is explicit before execution
-- ✅ **Testable** - can test individual tasks easily
+✅ **Builder pattern** - Clean, standard design pattern
+✅ **Explicit** - Clear task creation and dependency wiring
+✅ **No magic** - No AST parsing, no hidden tracking
+✅ **Flexible** - Easy conditionals, loops, dynamic tasks
+✅ **Type safe** - All objects are properly typed
+✅ **Debuggable** - Can inspect builder and tasks
+✅ **Testable** - Can test individual functions easily
+
+### Key Classes
+
+- **PipelineBuilder** - Manages task creation and tracks DAG
+- **Task** - Wraps functions, tracks dependencies
+- **Pipeline** - Executes pipelines in different modes
+- **DAG** - Represents task graph, provides topological sort
 
 ---
 
