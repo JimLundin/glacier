@@ -15,564 +15,243 @@ A code-centric data pipeline library built on Polars with infrastructure-from-co
 - 🔗 **Explicit Dependencies**: Type-safe task dependencies (no magic strings!)
 - ⚡ **Polars-Native**: Built on Polars LazyFrames for optimal performance
 - 🏗️ **Infrastructure Generation**: Auto-generate Terraform from pipeline definitions
-- 🔄 **Heterogeneous Execution**: Mix local, Databricks, DBT, Spark in one pipeline
+- 🔄 **Heterogeneous Execution**: Mix local, Lambda, Databricks, Spark in one pipeline
 - 📊 **DAG Resolution**: Automatic dependency graph construction and validation
+- 🧩 **Execution Resources**: First-class execution resources (local, serverless, VM, cluster)
 
 ## What's New
 
-✨ **Environment-First Design**: Dependency injection with `GlacierEnv` for better testability and multi-environment support
+✨ **Execution Resources as First-Class Objects**: Create execution environments from provider
 ✨ **Provider Configuration Classes**: Type-safe configs (`AwsConfig`, `GcpConfig`, `AzureConfig`, `LocalConfig`)
-✨ **Environment Registry**: Centralized resource management (`env.register()`, `env.get()`)
-✨ **Provider Abstraction**: Write cloud-agnostic pipelines
-✨ **Explicit Dependencies**: Pass task objects, not strings
-✨ **Executor Specification**: Run tasks on different platforms
-✨ **Modern Python**: Uses `|` union syntax and built-in types
+✨ **Single Provider Class**: Behavior determined by config injection, not subclasses
+✨ **Task Binding to Executors**: `@executor.task()` pattern - bind tasks to execution resources
+✨ **Provider Abstraction**: Same code works with AWS, Azure, GCP, or local
+✨ **No Deployment Environment**: Glacier handles execution environment only (dev/staging/prod is infrastructure concern)
 
-See [DESIGN_UX.md](./DESIGN_UX.md) for the full design and [ARCHITECTURE_V2.md](./ARCHITECTURE_V2.md) for architecture details.
+See [DESIGN_UX.md](./DESIGN_UX.md) for complete architecture details and [examples/](./examples/) for usage examples.
 
 ## Quick Start
 
-### Environment-First Pattern
-
-Glacier uses dependency injection with `GlacierEnv` for better testability, type safety, and multi-environment support.
-
-**CRITICAL:** Uses a SINGLE `Provider` class - behavior determined by config injection, NOT subclasses!
+### Simple Local Pipeline
 
 ```python
-from glacier import GlacierEnv, Provider
-from glacier.config import AwsConfig
+from glacier import Provider, pipeline
+from glacier.config import LocalConfig
 import polars as pl
 
 # 1. Create provider with config injection
-# Provider behavior determined by config - NOT subclasses!
-aws_config = AwsConfig(
-    region="us-east-1",
-    profile="production",
-    tags={"environment": "prod", "team": "data-eng"}
-)
-provider = Provider(config=aws_config)  # AWS behavior via config
+# Config determines WHERE DATA LIVES (local filesystem)
+provider = Provider(config=LocalConfig(base_path="./data"))
 
-# 2. Create environment
-env = GlacierEnv(provider=provider, name="production")
+# 2. Create EXECUTION resource (where code runs)
+local_exec = provider.local()
 
-# 3. Define tasks bound to environment
-@env.task()
+# 3. Create STORAGE resource (where data lives)
+data_source = provider.bucket(bucket="data", path="input.parquet")
+
+# 4. Define tasks bound to execution resource
+@local_exec.task()
 def load_data(source) -> pl.LazyFrame:
     """Load data from source."""
     return source.scan()
 
-@env.task()
+@local_exec.task()
 def clean_data(df: pl.LazyFrame) -> pl.LazyFrame:
     """Remove null values."""
     return df.filter(pl.col("value").is_not_null())
 
-@env.task()
+@local_exec.task()
 def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
     """Aggregate by category."""
     return df.group_by("category").agg(pl.col("value").sum())
 
-# 4. Define pipeline
-@env.pipeline(name="my_pipeline")
-def my_pipeline():
-    # Access provider via env.provider
-    data_source = env.provider.bucket("my-data", path="raw/data.parquet")
-
+# 5. Define pipeline
+@pipeline(name="simple_etl")
+def simple_pipeline():
     df = load_data(data_source)
     cleaned = clean_data(df)
     result = aggregate(cleaned)
     return result
 
-# 5. Run locally
+# 6. Run locally
 if __name__ == "__main__":
-    result = my_pipeline.run(mode="local")
+    result = simple_pipeline.run(mode="local")
     print(result.collect())
 ```
 
-**Benefits of Environment-First:**
-- ✅ **Explicit dependencies** - Configuration flows clearly through the system
-- ✅ **Environment isolation** - Dev, staging, and prod environments coexist
-- ✅ **Type safety** - Full IDE autocomplete and type checking
-- ✅ **Testability** - Easy to inject mock providers for testing
-- ✅ **Multi-cloud** - Switch providers without code changes
-
 ### Cloud-Agnostic Pipeline
 
-Switch clouds by changing the config - single Provider class adapts its behavior:
+Switch clouds by changing ONLY the provider config - same code works everywhere!
 
 ```python
-from glacier import GlacierEnv, Provider
-from glacier.config import AwsConfig, AzureConfig, LocalConfig
+from glacier import Provider, pipeline
+from glacier.config import AwsConfig, AzureConfig, GcpConfig, LocalConfig
+import polars as pl
+import os
 
-# Development: Local behavior via LocalConfig
-dev_provider = Provider(config=LocalConfig(base_path="./data"))
-dev_env = GlacierEnv(provider=dev_provider, name="development")
+# Dynamic provider selection based on environment
+def create_provider():
+    cloud = os.getenv("GLACIER_CLOUD", "local")
 
-# Staging: AWS behavior via AwsConfig
-staging_provider = Provider(config=AwsConfig(region="us-west-2"))
-staging_env = GlacierEnv(provider=staging_provider, name="staging")
+    if cloud == "aws":
+        return Provider(config=AwsConfig(region="us-east-1"))
+    elif cloud == "azure":
+        return Provider(config=AzureConfig(
+            subscription_id="...",
+            resource_group="glacier-rg",
+            location="eastus"
+        ))
+    elif cloud == "gcp":
+        return Provider(config=GcpConfig(
+            project_id="my-project",
+            region="us-central1"
+        ))
+    else:
+        return Provider(config=LocalConfig(base_path="./data"))
 
-# Production: Azure behavior via AzureConfig
-prod_provider = Provider(config=AzureConfig(
-    resource_group="prod-rg",
-    location="eastus",
-    subscription_id="..."
-))
-prod_env = GlacierEnv(provider=prod_provider, name="production")
+provider = create_provider()
 
-# Same task logic, different environments!
-# Provider behavior determined by injected config
-@dev_env.task()
-def process_data(source) -> pl.LazyFrame:
-    return source.scan()
+# Rest of code is IDENTICAL regardless of cloud!
+local_exec = provider.local()
+bucket = provider.bucket(bucket="company-data", path="sales.parquet")
+
+@local_exec.task()
+def process(source):
+    return source.scan().filter(pl.col("amount") > 0)
+
+@pipeline(name="cloud_agnostic")
+def my_pipeline():
+    return process(bucket)
+
+# Works on AWS S3, Azure Blob, GCS, or local filesystem!
 ```
 
 ### Heterogeneous Execution
 
-Mix different execution backends in one pipeline:
+Run different tasks on different execution platforms in the same pipeline:
 
 ```python
-# Provider adapts based on injected AwsConfig
-provider = Provider(config=AwsConfig(region="us-east-1"))
-env = GlacierEnv(provider=provider)
+from glacier import Provider, pipeline
+from glacier.config import AwsConfig, LambdaConfig, DatabricksConfig
+import polars as pl
 
-@env.task()
-def load_from_s3(source) -> pl.LazyFrame:
-    """Runs locally."""
+# Provider determines WHERE DATA LIVES (AWS S3)
+provider = Provider(config=AwsConfig(region="us-east-1"))
+
+# Create different EXECUTION resources (where code runs)
+local_exec = provider.local()
+lambda_exec = provider.serverless(config=LambdaConfig(memory=1024))
+databricks_exec = provider.cluster(config=DatabricksConfig(
+    cluster_id="cluster-123",
+    instance_type="i3.xlarge"
+))
+
+# Storage resources
+raw_data = provider.bucket(bucket="data-lake", path="raw/data.parquet")
+
+# Tasks on different executors
+@local_exec.task()
+def extract(source) -> pl.LazyFrame:
+    """Runs on local Python process."""
     return source.scan()
 
-@env.task(executor="dbt")
-def transform_with_dbt(df: pl.LazyFrame) -> pl.LazyFrame:
-    """Runs on DBT."""
-    # DBT transformation logic
+@lambda_exec.task()
+def transform(df: pl.LazyFrame) -> pl.LazyFrame:
+    """Runs on AWS Lambda."""
+    return df.filter(pl.col("value") > 0)
+
+@databricks_exec.task()
+def ml_predict(df: pl.LazyFrame) -> pl.LazyFrame:
+    """Runs on Databricks cluster with GPUs."""
+    return df.with_columns(pl.lit(0.9).alias("prediction"))
+
+@pipeline(name="ml_pipeline")
+def ml_pipeline():
+    data = extract(raw_data)        # Local
+    cleaned = transform(data)       # Lambda
+    predictions = ml_predict(cleaned)  # Databricks
+    return predictions
+
+result = ml_pipeline.run(mode="local")
+```
+
+## Key Concepts
+
+### Provider Creates Resources
+
+The `Provider` is the single entry point for creating resources:
+
+**Storage Resources (where data lives):**
+```python
+bucket = provider.bucket(
+    bucket="my-bucket",
+    path="file.parquet",
+    config=S3Config(versioning=True, encryption="AES256")
+)
+```
+
+**Execution Resources (where code runs):**
+```python
+local_exec = provider.local()
+lambda_exec = provider.serverless(config=LambdaConfig(...))
+vm_exec = provider.vm(config=EC2Config(...))
+databricks_exec = provider.cluster(config=DatabricksConfig(...))
+spark_exec = provider.cluster(config=SparkConfig(...))
+```
+
+### Tasks Bound to Execution Resources
+
+```python
+# Tasks bound to specific execution resources
+@local_exec.task()
+def runs_locally():
     pass
 
-@env.task(executor="databricks")
-def ml_on_databricks(df: pl.LazyFrame) -> pl.LazyFrame:
-    """Runs on Databricks."""
-    # ML processing on Databricks
+@databricks_exec.task()
+def runs_on_databricks():
     pass
-
-@env.task()
-def save_results(df: pl.LazyFrame):
-    """Runs locally."""
-    df.collect().write_parquet("output.parquet")
 ```
 
-## CLI Usage
+### Config Determines Behavior
 
-```bash
-# Run pipeline locally
-glacier run my_pipeline.py
+- **Provider config** determines WHERE DATA LIVES (AWS S3, Azure Blob, GCS, local)
+- **Resource config** determines specific backend (LambdaConfig → Lambda, DatabricksConfig → Databricks)
+- **Same code**, different configs = different clouds!
 
-# Generate infrastructure code
-glacier generate my_pipeline.py --output ./infra
+### No Deployment Environment
 
-# Analyze pipeline structure
-glacier analyze my_pipeline.py
+Glacier handles **execution environment** (where code runs, where data lives), NOT deployment environment (dev/staging/prod).
 
-# Validate pipeline
-glacier validate my_pipeline.py
-```
+Deployment environments should be handled via:
+- Separate Terraform workspaces
+- Different AWS accounts/GCP projects/Azure subscriptions
+- CI/CD pipeline configuration
 
-## Environment Registry Pattern
+## Examples
 
-Register commonly used resources in the environment for easy access:
+See [examples/](./examples/) for complete working examples:
 
-```python
-from glacier import GlacierEnv, Provider
-from glacier.config import AwsConfig, S3Config
+- **simple_pipeline.py** - Basic local pipeline with `@local_exec.task()`
+- **cloud_agnostic_pipeline.py** - Same code works with AWS, Azure, GCP, or local
+- **heterogeneous_pipeline.py** - Mix local, Lambda, Spark, Databricks execution
 
-# Create environment with unified Provider
-provider = Provider(config=AwsConfig(region="us-east-1"))
-env = GlacierEnv(provider=provider, name="production")
+## Documentation
 
-# Register shared resources
-env.register("sales_raw", provider.bucket(
-    "sales",
-    path="raw/transactions.parquet",
-    config=S3Config(versioning=True, encryption="AES256")
-))
-
-env.register("sales_processed", provider.bucket(
-    "sales",
-    path="processed/transactions.parquet",
-    config=S3Config(versioning=True, encryption="AES256")
-))
-
-env.register("customers", provider.bucket(
-    "customers",
-    path="customers.parquet"
-))
-
-# Tasks can retrieve resources from registry
-@env.task()
-def extract_sales() -> pl.LazyFrame:
-    source = env.get("sales_raw")
-    return source.scan()
-
-@env.task()
-def save_results(df: pl.LazyFrame) -> None:
-    target = env.get("sales_processed")
-    df.collect().write_parquet(target.get_uri())
-
-# List registered resources
-print(env.list_resources())  # ['sales_raw', 'sales_processed', 'customers']
-```
-
-## Multi-Cloud Support
-
-The environment-first pattern makes multi-cloud deployment simple.
-
-**CRITICAL:** Single Provider class - behavior determined by config!
-
-```python
-from glacier import GlacierEnv, Provider
-from glacier.config import AwsConfig, AzureConfig, LocalConfig, GcpConfig
-
-# Development: Local behavior via LocalConfig
-dev_env = GlacierEnv(
-    provider=Provider(config=LocalConfig(base_path="./data")),
-    name="development"
-)
-
-# Staging: AWS behavior via AwsConfig
-staging_env = GlacierEnv(
-    provider=Provider(config=AwsConfig(region="us-west-2", profile="staging")),
-    name="staging"
-)
-
-# Production: Azure behavior via AzureConfig
-prod_env = GlacierEnv(
-    provider=Provider(config=AzureConfig(
-        resource_group="prod-rg",
-        location="eastus",
-        subscription_id="..."
-    )),
-    name="production"
-)
-
-# GCP option: GCP behavior via GcpConfig
-gcp_env = GlacierEnv(
-    provider=Provider(config=GcpConfig(
-        project_id="my-project",
-        region="us-central1"
-    )),
-    name="gcp-prod"
-)
-
-# Define tasks once, bind to multiple environments
-def create_tasks(env: GlacierEnv):
-    @env.task()
-    def process_data(source) -> pl.LazyFrame:
-        return source.scan()
-
-    return process_data
-
-# Bind to each environment
-dev_task = create_tasks(dev_env)
-staging_task = create_tasks(staging_env)
-prod_task = create_tasks(prod_env)
-```
-
-## Provider Configuration
-
-Load from environment variables (12-factor app):
-
-```python
-# Single Provider.from_env() reads GLACIER_PROVIDER env var
-# then loads appropriate config from environment
-provider = Provider.from_env()
-
-# Example with GLACIER_PROVIDER=aws:
-# Reads AWS_REGION, AWS_PROFILE, etc.
-
-# Example with GLACIER_PROVIDER=gcp:
-# Reads GCP_PROJECT_ID, GCP_REGION, etc.
-
-# Example with GLACIER_PROVIDER=azure:
-# Reads AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, etc.
-```
-
-## Infrastructure Generation
-
-Generate Terraform for your pipeline:
-
-```bash
-glacier generate my_pipeline.py --output ./infra
-```
-
-Creates:
-- `main.tf` - Cloud resources (S3/Azure Blob/GCS buckets, IAM, etc.)
-- `variables.tf` - Configurable parameters
-- `outputs.tf` - Resource outputs
-- `terraform.tfvars.example` - Example configuration
-- `README.md` - Documentation
-
-Then deploy:
-
-```bash
-cd infra
-terraform init
-terraform plan
-terraform apply
-```
+- [DESIGN_UX.md](./DESIGN_UX.md) - Complete architecture and design patterns
+- [QUICKSTART.md](./QUICKSTART.md) - Step-by-step tutorial
+- [CONTRIBUTING.md](./CONTRIBUTING.md) - How to contribute
 
 ## Installation
 
 ```bash
-# Install from source
+# Clone the repository
+git clone https://github.com/JimLundin/glacier.git
+cd glacier
+
+# Install in development mode
 pip install -e .
-
-# With cloud provider support
-pip install -e ".[aws]"      # AWS (boto3)
-pip install -e ".[gcp]"      # GCP (google-cloud-storage)
-pip install -e ".[azure]"    # Azure (azure-storage-blob)
-pip install -e ".[all]"      # All providers
 ```
-
-## Explicit Dependencies (No Magic Strings!)
-
-```python
-# ❌ OLD WAY - Magic strings, error-prone
-@task
-def load_data():
-    pass
-
-@task(depends_on=["load_data"])  # Typo-prone!
-def process_data():
-    pass
-
-# ✅ NEW WAY - Type-safe, refactoring-friendly
-@task
-def load_data():
-    pass
-
-@task(depends_on=[load_data])  # Pass the actual task!
-def process_data():
-    pass
-```
-
-Benefits:
-- ✅ IDE autocomplete and type checking
-- ✅ Refactoring works automatically
-- ✅ No typos or missing dependencies
-- ✅ Clear errors if task doesn't exist
-
-## Examples
-
-See the [examples](./examples/) directory for:
-- `simple_pipeline.py` - Basic local pipeline
-- `s3_pipeline.py` - Multi-source AWS pipeline
-- `multi_cloud_pipeline.py` - Cloud-agnostic pipeline
-- `heterogeneous_pipeline.py` - Mixed execution backends
-
-## Documentation
-
-- [Architecture V2](./ARCHITECTURE_V2.md) - New architecture and improvements
-- [Design Document](./DESIGN.md) - Original design philosophy
-- [Quick Start Guide](./QUICKSTART.md) - Get started in 5 minutes
-- [Contributing](./CONTRIBUTING.md) - How to contribute
-
-## Key Concepts
-
-### GlacierEnv (Environment)
-
-The central orchestrator using dependency injection:
-
-```python
-from glacier import GlacierEnv, Provider
-from glacier.config import AwsConfig
-
-# Create environment with provider
-provider = Provider(config=AwsConfig(region="us-east-1"))
-env = GlacierEnv(provider=provider, name="production")
-
-# Environment manages:
-# - Provider configuration
-# - Resource registry (env.register(), env.get())
-# - Task binding (@env.task())
-# - Pipeline binding (@env.pipeline())
-```
-
-### Provider
-
-Single Provider class that adapts based on injected configuration.
-
-**CRITICAL:** NO provider-specific classes! Config determines behavior!
-
-```python
-from glacier import Provider
-from glacier.config import AwsConfig, GcpConfig, AzureConfig
-
-# AWS behavior via AwsConfig
-provider = Provider(config=AwsConfig(region="us-east-1", profile="prod"))
-
-# GCP behavior via GcpConfig
-provider = Provider(config=GcpConfig(project_id="my-project"))
-
-# Azure behavior via AzureConfig
-provider = Provider(config=AzureConfig(subscription_id="..."))
-
-# From environment variables (reads GLACIER_PROVIDER env var)
-provider = Provider.from_env()
-
-# Create environment from provider
-env = provider.env(name="production")
-```
-
-### Resources
-
-Resources are cloud-agnostic abstractions (Bucket, Serverless):
-
-```python
-# Created via provider (recommended)
-bucket = provider.bucket(
-    "my-data",
-    path="file.parquet",
-    config=S3Config(versioning=True)
-)
-
-# Register in environment for shared access
-env.register("data", bucket)
-
-# Retrieve from environment
-data = env.get("data")
-```
-
-### Tasks
-
-Tasks are environment-bound functions:
-
-```python
-# Basic task
-@env.task()
-def my_task(input: pl.LazyFrame) -> pl.LazyFrame:
-    return input.filter(pl.col("value") > 0)
-
-# Task with configuration
-@env.task(timeout=600, retries=3, executor="databricks")
-def heavy_task(df: pl.LazyFrame) -> pl.LazyFrame:
-    return df.filter(pl.col("value") > 100)
-```
-
-### Pipelines
-
-Pipelines orchestrate tasks:
-
-```python
-# Define pipeline
-@env.pipeline(name="my_pipeline")
-def my_pipeline():
-    source = env.provider.bucket("data", path="input.parquet")
-    data = load_data(source)
-    cleaned = clean_data(data)
-    result = aggregate(cleaned)
-    return result
-
-# Execute in different modes
-result = my_pipeline.run(mode="local")     # Run locally
-dag = my_pipeline.run(mode="analyze")      # Analyze structure
-infra = my_pipeline.run(mode="generate")   # Generate infrastructure
-```
-
-## Why Glacier?
-
-### Before Glacier
-
-```
-✏️ Write pipeline code in Python
-✏️ Write separate Terraform for infrastructure
-✏️ Write separate Airflow/Prefect DAGs
-❌ Keep everything in sync manually
-❌ Repeat yourself across files
-❌ Deploy process is complex
-```
-
-### With Glacier
-
-```
-✏️ Write pipeline code in Python
-✅ Infrastructure generated automatically
-✅ DAG built automatically
-✅ Everything stays in sync
-✅ Single source of truth
-✅ Deploy with one command
-```
-
-## Design Principles
-
-1. **Code-Centric**: Everything defined in Python
-2. **Infrastructure from Code**: Generate infra from code, not vice versa
-3. **Explicit over Implicit**: No magic, clear intentions
-4. **Cloud-Agnostic**: Deploy anywhere without code changes
-5. **Type-Safe**: Leverage Python's type system
-6. **Lazy by Default**: Optimize with Polars LazyFrames
-7. **Extensible**: Easy to add providers, executors, sources
-
-## Supported Providers
-
-| Provider | Status | Storage | Infrastructure |
-|----------|--------|---------|----------------|
-| AWS | ✅ Ready | S3 | Terraform |
-| Azure | ✅ Ready | Blob Storage | Terraform |
-| GCP | ✅ Ready | Cloud Storage | Terraform |
-| Local | ✅ Ready | Filesystem | None |
-
-## Supported Executors
-
-| Executor | Status | Description |
-|----------|--------|-------------|
-| local | ✅ Ready | Local Python process |
-| dbt | 🚧 Planned | DBT models |
-| databricks | 🚧 Planned | Databricks jobs |
-| spark | 🚧 Planned | Spark jobs |
-| airflow | 🚧 Planned | Airflow operators |
-
-## Roadmap
-
-### Phase 1: Foundation (✅ Complete)
-- ✅ Core abstractions
-- ✅ Provider system
-- ✅ Local execution
-- ✅ Terraform generation
-- ✅ CLI
-
-### Phase 2: Multi-Cloud (Current)
-- ✅ Azure Blob Storage support
-- ✅ Google Cloud Storage support
-- ✅ Multi-cloud infrastructure generation
-- [ ] Cross-cloud data transfer
-- [ ] Provider credential management
-
-### Phase 3: Orchestration
-- [ ] DBT executor
-- [ ] Databricks executor
-- [ ] Airflow DAG generation
-- [ ] Prefect flow generation
-- [ ] Dagster pipeline generation
-
-### Phase 4: Advanced
-- [ ] Streaming pipelines
-- [ ] Data quality checks
-- [ ] Cost optimization
-- [ ] Observability
-- [ ] Web UI
-
-## Contributing
-
-We welcome contributions! See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 
 ## License
 
 MIT License - see [LICENSE](./LICENSE) for details.
-
-## Community
-
-- 📚 [Documentation](./docs/)
-- 💬 [Discussions](https://github.com/yourusername/glacier/discussions)
-- 🐛 [Issues](https://github.com/yourusername/glacier/issues)
-- 🎯 [Roadmap](https://github.com/yourusername/glacier/projects)
-
----
-
-Built with ❤️ by the Glacier team. Deploy data pipelines to any cloud with confidence.

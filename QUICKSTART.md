@@ -6,7 +6,7 @@ Get started with Glacier in 5 minutes!
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/glacier.git
+git clone https://github.com/JimLundin/glacier.git
 cd glacier
 
 # Install in development mode
@@ -18,286 +18,342 @@ pip install glacier-pipeline
 
 ## Your First Pipeline
 
-### 1. Create a Pipeline File
+### 1. Create Sample Data
+
+Create `./data/input.parquet`:
+
+```python
+import polars as pl
+
+# Create sample data
+df = pl.DataFrame({
+    "id": [1, 2, 3, 4, 5],
+    "category": ["A", "B", "A", "C", "B"],
+    "value": [100, 200, 150, 300, 250]
+})
+
+# Save as parquet
+df.write_parquet("./data/input.parquet")
+```
+
+### 2. Create Your First Pipeline
 
 Create `my_first_pipeline.py`:
 
 ```python
-from glacier import pipeline, task
-from glacier.sources import LocalSource
+from glacier import Provider, pipeline
+from glacier.config import LocalConfig
 import polars as pl
 
-# Define where your data comes from
-data_source = LocalSource(
-    bucket="./data",
-    path="input.csv",
-    format="csv"
-)
+# 1. Create provider with config injection
+# Config determines WHERE DATA LIVES (local filesystem)
+provider = Provider(config=LocalConfig(base_path="./data"))
 
-# Define a task to load data
-@task
-def load_data(source: LocalSource) -> pl.LazyFrame:
+# 2. Create EXECUTION resource (where code runs)
+local_exec = provider.local()
+
+# 3. Create STORAGE resource (where data lives)
+data_source = provider.bucket(bucket="data", path="input.parquet")
+
+# 4. Define tasks bound to execution resource
+@local_exec.task()
+def load_data(source) -> pl.LazyFrame:
     """Load data from source."""
+    print("Loading data...")
     return source.scan()
 
-# Define a task to clean data
-@task(depends_on=["load_data"])
+@local_exec.task()
 def clean_data(df: pl.LazyFrame) -> pl.LazyFrame:
-    """Remove rows with missing values."""
-    return df.drop_nulls()
+    """Remove rows with null values."""
+    print("Cleaning data...")
+    return df.filter(pl.col("value").is_not_null())
 
-# Define a task to transform data
-@task(depends_on=["clean_data"])
+@local_exec.task()
 def transform(df: pl.LazyFrame) -> pl.LazyFrame:
     """Calculate derived columns."""
+    print("Transforming data...")
     return df.with_columns([
-        (pl.col("amount") * 1.1).alias("amount_with_tax")
+        (pl.col("value") * 1.1).alias("value_with_markup")
     ])
 
-# Define the pipeline
+@local_exec.task()
+def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
+    """Aggregate by category."""
+    print("Aggregating data...")
+    return df.group_by("category").agg([
+        pl.col("value").sum().alias("total_value"),
+        pl.col("value").mean().alias("avg_value"),
+        pl.count().alias("count")
+    ])
+
+# 5. Define pipeline
 @pipeline(name="my_first_pipeline")
 def my_pipeline():
     """My first Glacier pipeline."""
     data = load_data(data_source)
     cleaned = clean_data(data)
-    result = transform(cleaned)
+    transformed = transform(cleaned)
+    result = aggregate(transformed)
     return result
-```
 
-### 2. Create Sample Data
+# 6. Run locally
+if __name__ == "__main__":
+    print("=" * 60)
+    print("Running My First Glacier Pipeline")
+    print("=" * 60)
 
-Create `./data/input.csv`:
+    result = my_pipeline.run(mode="local")
 
-```csv
-id,name,amount
-1,Alice,100
-2,Bob,200
-3,Charlie,300
+    print("\nPipeline Result:")
+    print(result.collect())
+
+    print("\n✓ Pipeline completed successfully!")
 ```
 
 ### 3. Run Your Pipeline
 
 ```bash
-# Run the pipeline locally
-glacier run my_first_pipeline.py
+python my_first_pipeline.py
 ```
 
-Or run it directly with Python:
+You should see:
 
+```
+============================================================
+Running My First Glacier Pipeline
+============================================================
+Loading data...
+Cleaning data...
+Transforming data...
+Aggregating data...
+
+Pipeline Result:
+shape: (3, 3)
+┌──────────┬─────────────┬───────────┐
+│ category ┆ total_value ┆ avg_value │
+│ ---      ┆ ---         ┆ ---       │
+│ str      ┆ i64         ┆ f64       │
+╞══════════╪═════════════╪═══════════╡
+│ A        ┆ 250         ┆ 125.0     │
+│ B        ┆ 450         ┆ 225.0     │
+│ C        ┆ 300         ┆ 300.0     │
+└──────────┴─────────────┴───────────┘
+
+✓ Pipeline completed successfully!
+```
+
+## Understanding the Pattern
+
+### Provider Creates Resources
+
+Glacier has TWO types of resources:
+
+**1. Storage Resources (where data lives):**
 ```python
-if __name__ == "__main__":
-    result = my_pipeline.run(mode="local")
-    print(result.collect())
-```
-
-## Going Further
-
-### Analyze Your Pipeline
-
-See the DAG structure:
-
-```bash
-glacier analyze my_first_pipeline.py
-```
-
-Get JSON output:
-
-```bash
-glacier analyze my_first_pipeline.py --format json
-```
-
-Generate a Mermaid diagram:
-
-```bash
-glacier analyze my_first_pipeline.py --format mermaid
-```
-
-### Validate Your Pipeline
-
-Check for errors without running:
-
-```bash
-glacier validate my_first_pipeline.py
-```
-
-### Use Cloud Storage
-
-Switch to S3:
-
-```python
-from glacier.sources import S3Source
-
-data_source = S3Source(
-    bucket="my-data-bucket",
-    path="data/input.parquet",
-    region="us-east-1"
+bucket = provider.bucket(
+    bucket="my-bucket",
+    path="file.parquet"
 )
 ```
 
-### Generate Infrastructure
-
-Automatically create Terraform for your pipeline:
-
-```bash
-glacier generate my_first_pipeline.py --output ./infra
+**2. Execution Resources (where code runs):**
+```python
+local_exec = provider.local()
 ```
 
-This creates:
-- `main.tf` - Main Terraform configuration
-- `variables.tf` - Input variables
-- `outputs.tf` - Outputs
-- `README.md` - Documentation
-
-Then apply it:
-
-```bash
-cd infra
-terraform init
-terraform plan
-terraform apply
-```
-
-## Key Concepts
-
-### Sources
-
-Sources represent where data comes from:
+### Tasks Bound to Execution Resources
 
 ```python
-# Local filesystem
-LocalSource(bucket="./data", path="file.parquet")
-
-# AWS S3
-S3Source(bucket="my-bucket", path="data.parquet", region="us-east-1")
-
-# Future: GCS, Azure, databases, APIs
+@local_exec.task()
+def my_task(source) -> pl.LazyFrame:
+    return source.scan()
 ```
 
-### Tasks
+Tasks are bound to execution resources using `@executor.task()`, NOT `@task(executor="...")`.
 
-Tasks are functions decorated with `@task`:
-
-```python
-@task
-def my_task(input: pl.LazyFrame) -> pl.LazyFrame:
-    return input.filter(pl.col("value") > 0)
-```
-
-Tasks can have explicit dependencies:
-
-```python
-@task(depends_on=["task1", "task2"])
-def my_task():
-    pass
-```
-
-### Pipelines
-
-Pipelines orchestrate tasks:
+### Pipelines Orchestrate Tasks
 
 ```python
 @pipeline(name="my_pipeline")
 def my_pipeline():
-    data = load_data(source)
+    data = load_data(data_source)
     result = process(data)
     return result
 ```
 
-### Lazy Evaluation
+## Going Cloud
 
-Glacier uses Polars LazyFrames for optimal performance:
+### Switch to AWS S3
+
+Update your pipeline to use AWS:
 
 ```python
-# This returns a LazyFrame - no computation yet
-result = my_pipeline.run(mode="local")
+from glacier import Provider, pipeline
+from glacier.config import AwsConfig, S3Config
+import polars as pl
 
-# Materialize when needed
-df = result.collect()
+# Provider config determines WHERE DATA LIVES (AWS S3)
+provider = Provider(config=AwsConfig(
+    region="us-east-1",
+    profile="default"  # or use AWS_PROFILE environment variable
+))
+
+# Create execution resource (still runs locally!)
+local_exec = provider.local()
+
+# Create storage resource (now in S3!)
+data_source = provider.bucket(
+    bucket="my-s3-bucket",
+    path="input.parquet",
+    config=S3Config(
+        storage_class="STANDARD",
+        encryption="AES256"
+    )
+)
+
+# Tasks are IDENTICAL - no code changes!
+@local_exec.task()
+def load_data(source) -> pl.LazyFrame:
+    return source.scan()
+
+@local_exec.task()
+def process(df: pl.LazyFrame) -> pl.LazyFrame:
+    return df.filter(pl.col("value") > 0)
+
+@pipeline(name="s3_pipeline")
+def s3_pipeline():
+    data = load_data(data_source)
+    result = process(data)
+    return result
+
+# Run locally, but data comes from S3!
+result = s3_pipeline.run(mode="local")
 ```
 
-## Common Patterns
+**Key insight**: Only the provider config changed! Task code is identical.
 
-### Multiple Sources
+### Cloud-Agnostic Pipeline
+
+Make your pipeline work with ANY cloud:
 
 ```python
-sales_data = S3Source(bucket="data", path="sales.parquet")
-customer_data = S3Source(bucket="data", path="customers.parquet")
+import os
+from glacier import Provider, pipeline
+from glacier.config import AwsConfig, AzureConfig, GcpConfig, LocalConfig
 
-@task
-def join_data(sales: pl.LazyFrame, customers: pl.LazyFrame) -> pl.LazyFrame:
-    return sales.join(customers, on="customer_id")
+def create_provider():
+    """Create provider based on environment variable."""
+    cloud = os.getenv("GLACIER_CLOUD", "local")
+
+    if cloud == "aws":
+        return Provider(config=AwsConfig(region="us-east-1"))
+    elif cloud == "azure":
+        return Provider(config=AzureConfig(
+            subscription_id=os.getenv("AZURE_SUBSCRIPTION_ID"),
+            resource_group="glacier-rg",
+            location="eastus"
+        ))
+    elif cloud == "gcp":
+        return Provider(config=GcpConfig(
+            project_id=os.getenv("GCP_PROJECT_ID"),
+            region="us-central1"
+        ))
+    else:
+        return Provider(config=LocalConfig(base_path="./data"))
+
+provider = create_provider()
+
+# Rest of code is IDENTICAL!
+local_exec = provider.local()
+bucket = provider.bucket(bucket="data", path="input.parquet")
+
+@local_exec.task()
+def process(source):
+    return source.scan().filter(pl.col("value") > 0)
+
+@pipeline(name="cloud_agnostic")
+def my_pipeline():
+    return process(bucket)
 ```
 
-### Conditional Logic
+Run on different clouds:
 
-```python
-@task
-def process(df: pl.LazyFrame, include_inactive: bool = False) -> pl.LazyFrame:
-    if include_inactive:
-        return df
-    return df.filter(pl.col("status") == "active")
+```bash
+# Local
+GLACIER_CLOUD=local python my_pipeline.py
+
+# AWS S3
+GLACIER_CLOUD=aws AWS_PROFILE=default python my_pipeline.py
+
+# Azure Blob
+GLACIER_CLOUD=azure python my_pipeline.py
+
+# Google Cloud Storage
+GLACIER_CLOUD=gcp python my_pipeline.py
 ```
 
-### Aggregations
+## Heterogeneous Execution
+
+Run different tasks on different platforms:
 
 ```python
-@task
-def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
-    return df.group_by("category").agg([
-        pl.col("amount").sum(),
-        pl.col("amount").mean(),
-        pl.count()
-    ])
+from glacier import Provider, pipeline
+from glacier.config import AwsConfig, LambdaConfig, DatabricksConfig
+import polars as pl
+
+# Provider determines where data lives (AWS S3)
+provider = Provider(config=AwsConfig(region="us-east-1"))
+
+# Create DIFFERENT execution resources
+local_exec = provider.local()  # Runs locally
+lambda_exec = provider.serverless(config=LambdaConfig(memory=1024))  # Runs on Lambda
+databricks_exec = provider.cluster(config=DatabricksConfig(
+    cluster_id="cluster-123",
+    instance_type="i3.xlarge"
+))  # Runs on Databricks
+
+# Storage
+data_source = provider.bucket(bucket="data-lake", path="raw.parquet")
+
+# Tasks on DIFFERENT executors
+@local_exec.task()
+def extract(source) -> pl.LazyFrame:
+    """Runs on local Python process."""
+    return source.scan()
+
+@lambda_exec.task()
+def transform(df: pl.LazyFrame) -> pl.LazyFrame:
+    """Runs on AWS Lambda."""
+    return df.filter(pl.col("value") > 0)
+
+@databricks_exec.task()
+def ml_predict(df: pl.LazyFrame) -> pl.LazyFrame:
+    """Runs on Databricks cluster with GPUs."""
+    return df.with_columns(pl.lit(0.9).alias("prediction"))
+
+@pipeline(name="heterogeneous")
+def heterogeneous_pipeline():
+    data = extract(data_source)        # Local
+    cleaned = transform(data)          # Lambda
+    predictions = ml_predict(cleaned)  # Databricks
+    return predictions
+
+result = heterogeneous_pipeline.run(mode="local")
 ```
 
 ## Next Steps
 
-1. Check out the [examples directory](./examples/) for more complex pipelines
-2. Read the [DESIGN.md](./DESIGN.md) to understand the architecture
-3. Explore the [API documentation](./docs/)
-4. Join our community and contribute!
+1. **Explore Examples**: Check out [examples/](./examples/) for complete working examples
+2. **Read Design Doc**: See [DESIGN_UX.md](./DESIGN_UX.md) for complete architecture details
+3. **Generate Infrastructure**: Learn how to generate Terraform from your pipelines
+4. **Contribute**: See [CONTRIBUTING.md](./CONTRIBUTING.md) to contribute
 
-## Troubleshooting
+## Key Takeaways
 
-### Pipeline Not Found
+✓ **Provider creates resources** - Both storage (bucket) and execution (local, serverless, VM, cluster)
+✓ **Tasks bound to executors** - `@executor.task()` pattern, not string-based
+✓ **Config determines behavior** - Single Provider class, config injection determines AWS/Azure/GCP/Local
+✓ **Cloud portability** - Same code, different configs = different clouds
+✓ **No deployment environment** - Glacier handles execution environment only
 
-Make sure your pipeline is decorated with `@pipeline`:
-
-```python
-@pipeline  # Don't forget this!
-def my_pipeline():
-    pass
-```
-
-### Task Dependencies Not Working
-
-Ensure dependency names match task function names:
-
-```python
-@task
-def load_data():  # Function name is "load_data"
-    pass
-
-@task(depends_on=["load_data"])  # Must match exactly
-def process():
-    pass
-```
-
-### LazyFrame Not Materializing
-
-Call `.collect()` to materialize:
-
-```python
-result = my_pipeline.run(mode="local")
-df = result.collect()  # Now it's a DataFrame
-print(df)
-```
-
-## Getting Help
-
-- Check the [examples](./examples/)
-- Read the [design docs](./DESIGN.md)
-- Open an issue on GitHub
-- Join our Discord/Slack
-
-Happy pipeline building! 🏔️
+Happy pipelining! 🏔️
