@@ -15,6 +15,7 @@ This document defines a **chainable storage** pattern for composing pipelines in
 - **No special-cased "source"** - All storage is treated equally
 - **Transforms are operations on storage** - `bucket.transform(task).to(bucket)`
 - **Lineage tracking** - Each bucket knows how it's produced
+- **Bucket with lineage IS the pipeline** - The final bucket IS the pipeline definition for code generation
 - **Single-source: Chain buckets directly** - `raw.transform(task).to(output)`
 - **Multi-source: Use Pipeline** - `Pipeline(s1=bucket1, s2=bucket2).transform(join).to(output)`
 
@@ -24,10 +25,11 @@ This document defines a **chainable storage** pattern for composing pipelines in
 
 1. [Design Principles](#design-principles)
 2. [Core Pattern](#core-pattern)
-3. [Chainable Storage API](#chainable-storage-api)
-4. [Why Chainable Storage](#why-chainable-storage)
-5. [Composition Patterns](#composition-patterns)
-6. [Implementation Specification](#implementation-specification)
+3. [Pipeline Definition Capture](#pipeline-definition-capture)
+4. [Chainable Storage API](#chainable-storage-api)
+5. [Why Chainable Storage](#why-chainable-storage)
+6. [Composition Patterns](#composition-patterns)
+7. [Implementation Specification](#implementation-specification)
 
 ---
 
@@ -206,6 +208,153 @@ result = pipeline.run(mode="cloud")
 5. **Mixing patterns** - Pipeline.to() returns Bucket, so you can continue chaining
 6. **Lineage** - Final bucket tracks all transforms that produced it
 7. **Execute** - Call `.run()` on the final bucket to execute the lineage
+
+---
+
+## Pipeline Definition Capture
+
+### The Bucket IS the Pipeline
+
+A key insight: **the final Bucket with lineage IS the pipeline definition**. This is captured for code generation.
+
+```python
+# Define your pipeline using chainable buckets
+etl_pipeline = (
+    raw_data
+    .transform(extract)
+    .to(intermediate)
+    .transform(transform)
+    .to(output)
+    .with_name("etl_pipeline")  # Optional: add metadata
+)
+
+# etl_pipeline is a Bucket, but it contains the complete pipeline definition
+print(etl_pipeline._lineage)  # List of TransformSteps
+
+# Use for execution
+etl_pipeline.run(mode="local")
+
+# Use for code generation (Terraform, etc.)
+etl_pipeline.run(mode="generate", output_dir="./infrastructure")
+
+# Use for analysis
+analysis = etl_pipeline.run(mode="analyze")
+print(analysis.estimated_cost())
+
+# Visualize
+print(etl_pipeline.visualize())
+```
+
+### Why This Works for Code Generation
+
+When you write:
+
+```python
+# pipelines.py
+from glacier import Provider
+
+provider = Provider(...)
+local_exec = provider.local()
+
+# Define storage
+raw = provider.bucket("data", "raw.parquet")
+output = provider.bucket("data", "output.parquet")
+
+# Define task
+@local_exec.task()
+def process(df): ...
+
+# Define pipeline
+my_pipeline = (
+    raw
+    .transform(process)
+    .to(output)
+    .with_name("my_pipeline")
+)
+```
+
+The code generator can:
+
+1. **Execute the Python file** - Run `pipelines.py` to instantiate the objects
+2. **Find pipelines** - Scan module for Buckets with lineage (e.g., `hasattr(obj, '_lineage') and len(obj._lineage) > 0`)
+3. **Extract definition** - Read the lineage to get all TransformSteps
+4. **Generate infrastructure** - Convert to Terraform, CloudFormation, etc.
+
+```python
+# Code generator (simplified)
+import importlib.util
+
+# Load user's pipeline module
+spec = importlib.util.spec_from_file_location("pipelines", "pipelines.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+# Find all pipeline definitions
+pipelines = []
+for name, obj in vars(module).items():
+    if hasattr(obj, '_lineage') and obj._lineage:
+        # This is a pipeline!
+        pipelines.append((name, obj))
+
+# Generate infrastructure for each pipeline
+for name, pipeline in pipelines:
+    print(f"Generating infrastructure for: {name}")
+    pipeline.run(mode="generate", output_dir=f"./terraform/{name}")
+```
+
+### Naming Pipelines
+
+Use `.with_name()` to add metadata for better identification:
+
+```python
+# Unnamed - uses bucket path as default
+pipeline = raw.transform(process).to(output)
+
+# Named - explicit pipeline name
+pipeline = (
+    raw
+    .transform(process)
+    .to(output)
+    .with_name("my_etl", "Daily ETL process")
+)
+
+# Access metadata
+print(pipeline._metadata["name"])  # "my_etl"
+```
+
+### Multi-Source Pipelines
+
+Multi-source pipelines also return Buckets with lineage:
+
+```python
+# Multi-source pipeline
+join_pipeline = (
+    Pipeline(sales=sales, customers=customers)
+    .transform(join_task)
+    .to(joined)
+    .with_name("sales_join")
+)
+
+# join_pipeline is a Bucket with MultiSourceTransformStep in lineage
+join_pipeline.run(mode="generate")
+```
+
+### Pipeline as First-Class Objects
+
+While buckets with lineage are the pipeline definitions, you can also work with explicit Pipeline objects:
+
+```python
+# Bucket-based (recommended)
+pipeline_bucket = raw.transform(process).to(output).with_name("etl")
+
+# Convert to explicit Pipeline object if needed
+pipeline_obj = pipeline_bucket.to_pipeline()
+print(type(pipeline_obj))  # Pipeline
+
+# Both work the same for execution/generation
+pipeline_bucket.run(mode="generate")
+pipeline_obj.run(mode="generate")
+```
 
 ---
 
@@ -1577,12 +1726,18 @@ result = pipeline.run(mode="cloud")
 
 ### Key Innovation
 
-**Storage is the fundamental unit** - Buckets are chainable for single-source, Pipeline handles multi-source then returns Bucket for continued chaining.
+**Bucket with lineage IS the pipeline definition**:
+- Clean, readable chaining API for building pipelines
+- The final Bucket contains complete pipeline definition in its lineage
+- Can be captured for code generation (Terraform, CloudFormation, etc.)
+- Single-source uses chainable buckets, multi-source uses Pipeline (returns Bucket)
 
 ### Benefits
 
-✅ **Simpler** - Use chainable buckets for single-source (most common)
-✅ **More consistent** - All buckets treated equally
+✅ **Clean and readable** - Fluent chaining API for pipeline composition
+✅ **Capturable** - Bucket with lineage IS the pipeline definition for code generation
+✅ **Simpler** - Use chainable buckets for single-source (most common case)
+✅ **More consistent** - All buckets treated equally, no special "source"
 ✅ **More intuitive** - Data flow is clear: bucket → transform → bucket
 ✅ **Flexible** - Pipeline for multi-source, returns Bucket for continued chaining
 ✅ **Explicit storage** - Every `.to()` is a materialization point
