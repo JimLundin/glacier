@@ -1,70 +1,60 @@
 """
-Simple example pipeline demonstrating Glacier's basic features.
+Simple pipeline demonstrating Glacier's execution resource pattern.
 
 This pipeline:
-1. Loads data from a local parquet file
+1. Loads data from local storage
 2. Filters out null values
 3. Aggregates by category
 4. Returns the result
 
-This example demonstrates the core Glacier pattern:
-- Provider with config injection (determines WHERE DATA LIVES)
-- GlacierEnv as DI container (execution context, NOT deployment environment)
-- Environment-bound tasks
-- Type-safe pipeline definition
-
-IMPORTANT: GlacierEnv represents an EXECUTION CONTEXT (a DI container), NOT a
-deployment environment (dev/staging/prod). The provider config determines where
-your data lives (local filesystem, AWS S3, Azure Blob, GCP Storage).
+CORRECT PATTERN:
+- Provider creates BOTH storage AND execution resources
+- Tasks bound to execution resources: @executor.task()
+- Storage: provider.bucket()
+- Execution: provider.local(), provider.serverless(), provider.vm(), provider.cluster()
 
 Run with:
     python examples/simple_pipeline.py
-    # OR
-    glacier run examples/simple_pipeline.py
 """
 
-from glacier import GlacierEnv, Provider
+from glacier import Provider, pipeline
 from glacier.config import LocalConfig
 import polars as pl
 
 # ============================================================================
-# 1. SETUP: Create execution context
+# 1. SETUP: Create provider and resources
 # ============================================================================
 
 # Provider configuration determines WHERE DATA LIVES
-# LocalConfig = data on local filesystem
-local_config = LocalConfig(
-    base_path="./examples/data",
-    create_dirs=True,
-)
+provider = Provider(config=LocalConfig(base_path="./examples/data"))
 
-# Create provider with config injection (single Provider class!)
-provider = Provider(config=local_config)
+# Create EXECUTION resource (where code runs)
+# This is a first-class resource, just like storage
+local_exec = provider.local()
 
-# Create execution context (DI container for tasks, pipelines, and resources)
-# The 'name' parameter is just an identifier for this context
-env = GlacierEnv(provider=provider, name="simple-etl")
+# Create STORAGE resource (where data lives)
+data_source = provider.bucket(bucket="examples/data", path="sample.parquet")
 
 # ============================================================================
-# 2. TASKS: Define tasks bound to execution context
+# 2. TASKS: Bind tasks to execution resources
 # ============================================================================
 
 
-@env.task()
+@local_exec.task()
 def load_data(source) -> pl.LazyFrame:
-    """Load data from the source."""
+    """Load data from source. Executes on local_exec."""
     return source.scan()
 
 
-@env.task()
+@local_exec.task()
 def clean_data(df: pl.LazyFrame) -> pl.LazyFrame:
-    """Remove rows with null values in critical columns."""
+    """Remove null values. Executes on local_exec."""
     return df.filter(pl.col("value").is_not_null() & pl.col("category").is_not_null())
 
 
-@env.task()
+@local_exec.task()
 def aggregate_by_category(df: pl.LazyFrame) -> pl.LazyFrame:
-    """Aggregate values by category."""
+    """Aggregate by category. Executes on local_exec."""
     return df.group_by("category").agg(
         [
             pl.col("value").sum().alias("total_value"),
@@ -79,25 +69,17 @@ def aggregate_by_category(df: pl.LazyFrame) -> pl.LazyFrame:
 # ============================================================================
 
 
-@env.pipeline(name="simple_etl")
+@pipeline(name="simple_etl")
 def simple_pipeline():
     """
-    Main pipeline function demonstrating Glacier basics.
+    Simple ETL pipeline.
 
-    This orchestrates the tasks and defines the data flow.
+    All tasks execute on local_exec (local Python process).
+    Data is read from local filesystem (determined by provider config).
     """
-    # Create data source using the provider
-    # Provider knows where data lives based on its config
-    data_source = env.provider.bucket(
-        bucket="examples/data",
-        path="sample.parquet",
-    )
-
-    # Data flow defines task dependencies
     raw_data = load_data(data_source)
     cleaned_data = clean_data(raw_data)
     result = aggregate_by_category(cleaned_data)
-
     return result
 
 
@@ -109,17 +91,29 @@ if __name__ == "__main__":
     print("=" * 60)
     print("Simple ETL Pipeline")
     print("=" * 60)
-    print(f"\nExecution Context: {env.name}")
-    print(f"Data Location: Local filesystem ({local_config.base_path})")
-    print(f"Provider: {env.provider}")
+    print(f"\nData Location: Local filesystem (./examples/data)")
+    print(f"Code Execution: Local Python process")
+    print(f"Provider: {provider}")
+
+    print("\n" + "=" * 60)
+    print("Glacier Resource Pattern")
+    print("=" * 60)
+    print("\n✓ Provider creates resources:")
+    print("  - Storage: provider.bucket() → where data lives")
+    print("  - Execution: provider.local() → where code runs")
+    print("\n✓ Both are first-class resources:")
+    print("  - Storage passed to tasks as parameters")
+    print("  - Execution binds tasks via @executor.task()")
+    print("\n✓ Cloud-agnostic:")
+    print("  - Same pattern for all clouds")
+    print("  - Config determines actual backend")
 
     # Run the pipeline
-    # All tasks execute locally (default executor="local")
-    print("\nRunning pipeline...")
+    print("\n" + "=" * 60)
+    print("Running pipeline...")
+    print("=" * 60)
     result = simple_pipeline.run(mode="local")
 
-    # Materialize and display the result
     print("\nPipeline Result:")
     print(result.collect())
-
     print("\n✓ Pipeline completed successfully!")
