@@ -15,7 +15,8 @@ This document defines a **chainable storage** pattern for composing pipelines in
 - **No special-cased "source"** - All storage is treated equally
 - **Transforms are operations on storage** - `bucket.transform(task).to(bucket)`
 - **Lineage tracking** - Each bucket knows how it's produced
-- **No Pipeline factory object** - Just chain storage directly
+- **Single-source: Chain buckets directly** - `raw.transform(task).to(output)`
+- **Multi-source: Use Pipeline** - `Pipeline(s1=bucket1, s2=bucket2).transform(join).to(output)`
 
 ---
 
@@ -75,16 +76,29 @@ Each bucket tracks the transformations that produce it:
 output._lineage = [step1, step2]
 ```
 
-### 4. No Pipeline Factory
+### 4. Single-Source vs Multi-Source
 
-No separate `Pipeline()` object - just chain buckets:
+For single-source transforms (most common), chain buckets directly. For multi-source transforms (joins, unions), use Pipeline:
 
 ```python
-# OLD (with Pipeline factory):
-pipeline = Pipeline(name="etl").source(raw).transform(t1).to(out)
+# Single source - chain buckets directly
+pipeline = raw.transform(extract).to(output)
 
-# NEW (direct chaining):
-pipeline = raw.transform(t1).to(out)
+# Multi-source - use Pipeline factory
+pipeline = (
+    Pipeline(sales=sales_bucket, customers=customers_bucket)
+    .transform(join_task)
+    .to(joined_output)
+)
+
+# Pipeline.to() returns a Bucket, so you can continue chaining
+pipeline = (
+    Pipeline(sales=sales_bucket, customers=customers_bucket)
+    .transform(join_task)
+    .to(joined)              # Returns Bucket
+    .transform(aggregate)     # Back to single-source chaining
+    .to(output)
+)
 ```
 
 ---
@@ -142,14 +156,56 @@ pipeline = (
 )
 ```
 
+### Multi-Source Example (Joins)
+
+```python
+from glacier import Provider, Pipeline
+import polars as pl
+
+# 1. Setup
+provider = Provider(config=AwsConfig(region="us-east-1"))
+local_exec = provider.local()
+spark_exec = provider.spark(config=SparkConfig(workers=3))
+
+# 2. Define storage
+sales = provider.bucket(bucket="data", path="sales.parquet")
+customers = provider.bucket(bucket="data", path="customers.parquet")
+joined = provider.bucket(bucket="data", path="joined.parquet")
+output = provider.bucket(bucket="data", path="output.parquet")
+
+# 3. Define multi-source task
+@spark_exec.task()
+def join_data(sales_df: pl.LazyFrame, customers_df: pl.LazyFrame) -> pl.LazyFrame:
+    """Join sales with customer data."""
+    return sales_df.join(customers_df, on="customer_id", how="left")
+
+@local_exec.task()
+def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
+    """Aggregate by region."""
+    return df.group_by("region").agg(pl.col("revenue").sum())
+
+# 4. Build pipeline: multi-source → single-source chaining
+pipeline = (
+    Pipeline(sales_df=sales, customers_df=customers)  # Multi-source start
+    .transform(join_data)                              # Uses both sources
+    .to(joined)                                        # Returns Bucket
+    .transform(aggregate)                              # Single-source (reads joined)
+    .to(output)                                        # Returns Bucket
+)
+
+# 5. Execute
+result = pipeline.run(mode="cloud")
+```
+
 ### Key Points
 
-1. **Start with a bucket** - Any bucket, they're all equal
-2. **`.transform(task)`** - Creates a PendingTransform (needs a target)
-3. **`.to(bucket)`** - Materializes the transform to storage, returns that bucket
-4. **Chaining** - Returned bucket can be transformed again
-5. **Lineage** - Final bucket tracks all transforms that produced it
-6. **Execute** - Call `.run()` on the final bucket to execute the lineage
+1. **Single source** - Chain buckets directly: `bucket.transform(task).to(bucket)`
+2. **Multi-source** - Use Pipeline: `Pipeline(src1=b1, src2=b2).transform(task).to(bucket)`
+3. **`.transform(task)`** - Creates a PendingTransform (needs a target)
+4. **`.to(bucket)`** - Materializes to storage, returns that bucket (chainable!)
+5. **Mixing patterns** - Pipeline.to() returns Bucket, so you can continue chaining
+6. **Lineage** - Final bucket tracks all transforms that produced it
+7. **Execute** - Call `.run()` on the final bucket to execute the lineage
 
 ---
 
@@ -395,12 +451,142 @@ class PendingTransform:
         return f"PendingTransform(source={self.source.path}, task={self.task.name})"
 ```
 
+### Pipeline Class
+
+```python
+class Pipeline:
+    """
+    Multi-source pipeline builder.
+
+    Use this when you need to pass multiple storage resources to a single transform
+    (e.g., joins, unions). For single-source transforms, use bucket.transform().
+
+    Pipeline.to() returns a Bucket, so you can continue chaining after multi-source.
+    """
+
+    def __init__(self, **sources: Bucket):
+        """
+        Create a multi-source pipeline.
+
+        Args:
+            **sources: Named storage resources (kwarg names match task parameter names)
+
+        Example:
+            Pipeline(sales=sales_bucket, customers=customers_bucket)
+        """
+        if not sources:
+            raise ValueError("Pipeline requires at least one source")
+
+        self.sources = sources
+        self._pending_transform: Task | None = None
+        self._all_steps: list[TransformStep] = []
+
+    def transform(self, task: Task) -> "PipelinePendingTransform":
+        """
+        Apply a transformation that reads from all sources.
+
+        The task function parameters must match the source names.
+
+        Args:
+            task: Task to execute
+
+        Returns:
+            PipelinePendingTransform (requires .to(bucket) to complete)
+
+        Example:
+            Pipeline(sales=s, customers=c).transform(join_task)
+        """
+        # Validate task signature matches sources
+        import inspect
+        sig = inspect.signature(task.func)
+        task_params = set(sig.parameters.keys())
+        source_names = set(self.sources.keys())
+
+        if task_params != source_names:
+            raise ValueError(
+                f"Task parameters {task_params} do not match sources {source_names}"
+            )
+
+        return PipelinePendingTransform(sources=self.sources, task=task)
+
+    def __repr__(self) -> str:
+        source_names = ", ".join(self.sources.keys())
+        return f"Pipeline(sources=[{source_names}])"
+
+
+class PipelinePendingTransform:
+    """A multi-source transformation that needs a target bucket to complete."""
+
+    def __init__(self, sources: dict[str, Bucket], task: Task):
+        """
+        Create a pending multi-source transform.
+
+        Args:
+            sources: Named source buckets
+            task: Task to execute
+        """
+        self.sources = sources
+        self.task = task
+
+    def to(self, target: Bucket) -> Bucket:
+        """
+        Write the transform output to a target bucket.
+
+        This materializes the transformation and returns a new Bucket with lineage.
+        The returned Bucket can be chained with further single-source transforms.
+
+        Args:
+            target: Bucket to write to
+
+        Returns:
+            New Bucket instance with lineage (chainable!)
+
+        Example:
+            # Multi-source → single-source chaining
+            output = (
+                Pipeline(s1=b1, s2=b2)
+                .transform(join)
+                .to(joined)              # Returns Bucket
+                .transform(aggregate)    # Single-source chaining!
+                .to(output)
+            )
+        """
+        # Create a multi-source transform step
+        step = MultiSourceTransformStep(
+            sources=self.sources,
+            task=self.task,
+            target=target
+        )
+
+        # Collect lineage from all sources
+        all_lineage = []
+        for source in self.sources.values():
+            all_lineage.extend(source._lineage)
+
+        # Add this step
+        all_lineage.append(step)
+
+        # Return target bucket with full lineage
+        return Bucket(
+            provider=target.provider,
+            bucket=target.bucket,
+            path=target.path,
+            config=target.config,
+            lineage=all_lineage,
+            metadata=target._metadata.copy()
+        )
+
+    def __repr__(self) -> str:
+        source_names = ", ".join(self.sources.keys())
+        return f"PipelinePendingTransform(sources=[{source_names}], task={self.task.name})"
+```
+
 ### TransformStep
 
 ```python
 @dataclass
 class TransformStep:
-    """A step in the pipeline: source → task → target."""
+    """A single-source step in the pipeline: source → task → target."""
     source: Bucket
     task: Task
     target: Bucket
@@ -410,6 +596,23 @@ class TransformStep:
         return TaskInstance(
             task=self.task,
             source=self.source,
+            target=self.target,
+            name=self.task.name
+        )
+
+
+@dataclass
+class MultiSourceTransformStep:
+    """A multi-source step in the pipeline: sources → task → target."""
+    sources: dict[str, Bucket]  # Named sources
+    task: Task
+    target: Bucket
+
+    def to_task_instance(self) -> TaskInstance:
+        """Convert to TaskInstance for DAG execution."""
+        return TaskInstance(
+            task=self.task,
+            sources=self.sources,
             target=self.target,
             name=self.task.name
         )
@@ -522,7 +725,70 @@ print(pipeline.visualize())
 pipeline.run(mode="cloud")
 ```
 
-### 3. Reusable Bucket References
+### 3. Multi-Source Pipelines (Joins)
+
+```python
+from glacier import Pipeline
+
+# Define storage
+sales = provider.bucket("data", "sales.parquet")
+customers = provider.bucket("data", "customers.parquet")
+products = provider.bucket("data", "products.parquet")
+joined = provider.bucket("data", "joined.parquet")
+enriched = provider.bucket("data", "enriched.parquet")
+output = provider.bucket("data", "output.parquet")
+
+# Define multi-source tasks
+@spark_exec.task()
+def join_sales_customers(sales_df: pl.LazyFrame, customers_df: pl.LazyFrame) -> pl.LazyFrame:
+    """Join sales with customers."""
+    return sales_df.join(customers_df, on="customer_id", how="left")
+
+@spark_exec.task()
+def enrich_with_products(joined_df: pl.LazyFrame, products_df: pl.LazyFrame) -> pl.LazyFrame:
+    """Add product information."""
+    return joined_df.join(products_df, on="product_id", how="left")
+
+@local_exec.task()
+def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
+    """Aggregate by region."""
+    return df.group_by("region").agg(pl.col("revenue").sum())
+
+# Build pipeline: multi-source → multi-source → single-source
+pipeline = (
+    Pipeline(sales_df=sales, customers_df=customers)  # Multi-source
+    .transform(join_sales_customers)
+    .to(joined)                                        # Returns Bucket
+    .transform(enrich_with_products)                   # ERROR! Single-source, but needs 2
+    # ...
+)
+
+# Correct approach: chain multi-source operations
+pipeline = (
+    Pipeline(sales_df=sales, customers_df=customers)  # First join
+    .transform(join_sales_customers)
+    .to(joined)                                        # Returns Bucket
+)
+
+pipeline = (
+    Pipeline(joined_df=joined, products_df=products)  # Second join
+    .transform(enrich_with_products)
+    .to(enriched)                                      # Returns Bucket
+    .transform(aggregate)                              # Single-source from here
+    .to(output)
+)
+
+# Or as one expression:
+enriched = (
+    Pipeline(joined_df=joined, products_df=products)
+    .transform(enrich_with_products)
+    .to(enriched)
+)
+
+output = enriched.transform(aggregate).to(output)
+```
+
+### 4. Reusable Bucket References
 
 ```python
 # Define storage once
@@ -812,7 +1078,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class TransformStep:
-    """A step in the pipeline: source → task → target."""
+    """A single-source step in the pipeline: source → task → target."""
     source: "Bucket"
     task: "Task"
     target: "Bucket"
@@ -828,52 +1094,92 @@ class TransformStep:
         )
 
 
+@dataclass
+class MultiSourceTransformStep:
+    """A multi-source step in the pipeline: sources → task → target."""
+    sources: dict[str, "Bucket"]
+    task: "Task"
+    target: "Bucket"
+
+    def to_task_instance(self) -> "TaskInstance":
+        """Convert to TaskInstance for DAG execution."""
+        from glacier.core.task import TaskInstance
+        return TaskInstance(
+            task=self.task,
+            sources=self.sources,
+            target=self.target,
+            name=self.task.name
+        )
+
+
 class Pipeline:
     """
-    Legacy Pipeline class (optional, for compatibility).
+    Multi-source pipeline builder.
 
-    Most users should use the chainable Bucket pattern instead.
-    This class exists for compatibility and advanced features.
+    Use this when you need to pass multiple storage resources to a single transform
+    (e.g., joins, unions). For single-source transforms, use bucket.transform().
     """
 
-    def __init__(
-        self,
-        name: str,
-        description: str | None = None,
-        steps: list[TransformStep] | None = None,
-        **config
-    ):
-        self.name = name
-        self.description = description
-        self.steps = steps or []
-        self.config = config
+    def __init__(self, **sources: "Bucket"):
+        """Create a multi-source pipeline."""
+        if not sources:
+            raise ValueError("Pipeline requires at least one source")
+        self.sources = sources
 
-    def run(self, mode: str = "local", **kwargs):
-        """Execute the pipeline."""
-        from glacier.core.dag import DAG
-        instances = [step.to_task_instance() for step in self.steps]
-        dag = DAG(instances)
+    def transform(self, task: "Task") -> "PipelinePendingTransform":
+        """Apply a transformation that reads from all sources."""
+        import inspect
+        sig = inspect.signature(task.func)
+        task_params = set(sig.parameters.keys())
+        source_names = set(self.sources.keys())
 
-        if mode == "local":
-            from glacier.runtime.local import LocalExecutor
-            executor = LocalExecutor(dag)
-            return executor.execute(**kwargs)
-        elif mode == "cloud":
-            from glacier.runtime.cloud import CloudExecutor
-            executor = CloudExecutor(dag)
-            return executor.execute(**kwargs)
-        elif mode == "analyze":
-            from glacier.codegen.analyzer import PipelineAnalysis
-            return PipelineAnalysis(dag)
-        elif mode == "generate":
-            from glacier.codegen.terraform import TerraformGenerator
-            generator = TerraformGenerator(dag)
-            return generator.generate(**kwargs)
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
+        if task_params != source_names:
+            raise ValueError(
+                f"Task parameters {task_params} do not match sources {source_names}"
+            )
+
+        return PipelinePendingTransform(sources=self.sources, task=task)
 
     def __repr__(self) -> str:
-        return f"Pipeline(name='{self.name}', steps={len(self.steps)})"
+        source_names = ", ".join(self.sources.keys())
+        return f"Pipeline(sources=[{source_names}])"
+
+
+class PipelinePendingTransform:
+    """A multi-source transformation that needs a target bucket."""
+
+    def __init__(self, sources: dict[str, "Bucket"], task: "Task"):
+        self.sources = sources
+        self.task = task
+
+    def to(self, target: "Bucket") -> "Bucket":
+        """Write the transform output to a target bucket (returns chainable Bucket)."""
+        step = MultiSourceTransformStep(
+            sources=self.sources,
+            task=self.task,
+            target=target
+        )
+
+        # Collect lineage from all sources
+        all_lineage = []
+        for source in self.sources.values():
+            all_lineage.extend(source._lineage)
+        all_lineage.append(step)
+
+        # Return target bucket with full lineage
+        from glacier.resources.bucket import Bucket
+        return Bucket(
+            provider=target.provider,
+            bucket=target.bucket,
+            path=target.path,
+            config=target.config,
+            lineage=all_lineage,
+            metadata=target._metadata.copy()
+        )
+
+    def __repr__(self) -> str:
+        source_names = ", ".join(self.sources.keys())
+        return f"PipelinePendingTransform(sources=[{source_names}], task={self.task.name})"
 ```
 
 ### 3. TaskInstance
@@ -922,35 +1228,63 @@ class TaskInstance:
     """
     An instance of a Task in a pipeline.
 
-    Represents: source → transform → target
+    Represents: source(s) → transform → target
+    Supports both single-source and multi-source transforms.
     """
 
     def __init__(
         self,
         task: Task,
-        source: "Bucket",
         target: "Bucket",
-        name: str
+        name: str,
+        source: "Bucket | None" = None,
+        sources: dict[str, "Bucket"] | None = None
     ):
+        """
+        Create a task instance.
+
+        Args:
+            task: The task to execute
+            target: Target bucket to write to
+            name: Instance name
+            source: Single source bucket (for single-source transforms)
+            sources: Named source buckets (for multi-source transforms)
+        """
         self.task = task
-        self.source = source
         self.target = target
         self.name = name
+
+        # Either source OR sources, not both
+        if source is not None and sources is not None:
+            raise ValueError("Cannot specify both source and sources")
+        if source is None and sources is None:
+            raise ValueError("Must specify either source or sources")
+
+        self.source = source
+        self.sources = sources
         self.dependencies: list["TaskInstance"] = []
 
     def execute(self, context: Any = None) -> Any:
         """
         Execute this task instance.
 
-        1. Read from source (scan as LazyFrame)
+        1. Read from source(s) - scan as LazyFrame(s)
         2. Execute task function
-        3. Write to target (materialize to parquet)
+        3. Write to target - materialize to parquet
         """
-        # Read from source
-        df = self.source.scan()
-
-        # Execute task
-        result = self.task.func(df=df)
+        if self.source is not None:
+            # Single-source execution
+            df = self.source.scan()
+            result = self.task.func(df=df)
+        else:
+            # Multi-source execution
+            # Load all sources as LazyFrames
+            source_dfs = {
+                name: bucket.scan()
+                for name, bucket in self.sources.items()
+            }
+            # Call task with named arguments
+            result = self.task.func(**source_dfs)
 
         # Write to target
         result.collect().write_parquet(self.target.get_uri())
@@ -958,7 +1292,11 @@ class TaskInstance:
         return result
 
     def __repr__(self) -> str:
-        return f"TaskInstance(name='{self.name}', source={self.source.path}, target={self.target.path})"
+        if self.source:
+            return f"TaskInstance(name='{self.name}', source={self.source.path}, target={self.target.path})"
+        else:
+            source_paths = ", ".join(f"{k}={v.path}" for k, v in self.sources.items())
+            return f"TaskInstance(name='{self.name}', sources=[{source_paths}], target={self.target.path})"
 ```
 
 ### 4. DAG Class
@@ -983,8 +1321,18 @@ class DAG:
         """Build dependencies based on source/target relationships."""
         for i, instance in enumerate(self.instances):
             instance.dependencies = []
+
+            # Collect all source paths for this instance
+            if instance.source:
+                # Single-source
+                source_paths = {instance.source.path}
+            else:
+                # Multi-source
+                source_paths = {bucket.path for bucket in instance.sources.values()}
+
+            # Find dependencies
             for prev_instance in self.instances[:i]:
-                if prev_instance.target.path == instance.source.path:
+                if prev_instance.target.path in source_paths:
                     instance.dependencies.append(prev_instance)
 
     def _validate(self):
@@ -1034,16 +1382,28 @@ class DAG:
         lines = ["graph LR"]
 
         for inst in self.instances:
-            # Show: source → task → target
-            source_id = inst.source.path.replace("/", "_").replace(".", "_")
             task_id = inst.name.replace(" ", "_")
             target_id = inst.target.path.replace("/", "_").replace(".", "_")
 
-            lines.append(f"    {source_id}[({inst.source.path})]")
-            lines.append(f"    {task_id}[\"{inst.name}<br/>({inst.task.executor.type})\"]")
-            lines.append(f"    {target_id}[({inst.target.path})]")
-            lines.append(f"    {source_id} --> {task_id}")
-            lines.append(f"    {task_id} --> {target_id}")
+            if inst.source:
+                # Single-source: source → task → target
+                source_id = inst.source.path.replace("/", "_").replace(".", "_")
+                lines.append(f"    {source_id}[({inst.source.path})]")
+                lines.append(f"    {task_id}[\"{inst.name}<br/>({inst.task.executor.type})\"]")
+                lines.append(f"    {target_id}[({inst.target.path})]")
+                lines.append(f"    {source_id} --> {task_id}")
+                lines.append(f"    {task_id} --> {target_id}")
+            else:
+                # Multi-source: source1 → task, source2 → task, task → target
+                lines.append(f"    {task_id}[\"{inst.name}<br/>({inst.task.executor.type})\"]")
+                lines.append(f"    {target_id}[({inst.target.path})]")
+
+                for name, bucket in inst.sources.items():
+                    source_id = bucket.path.replace("/", "_").replace(".", "_")
+                    lines.append(f"    {source_id}[({bucket.path})]")
+                    lines.append(f"    {source_id} --> {task_id}")
+
+                lines.append(f"    {task_id} --> {target_id}")
 
         return "\n".join(lines)
 
@@ -1154,7 +1514,7 @@ __all__ = ["Provider", "Pipeline", "Bucket"]
 
 ## Summary
 
-### Core Pattern
+### Core Pattern: Single-Source
 
 ```python
 # 1. Define storage (all equal - no special "source")
@@ -1169,7 +1529,7 @@ def extract(df): ...
 @lambda_exec.task()
 def transform(df): ...
 
-# 3. Chain buckets directly (no Pipeline factory)
+# 3. Chain buckets directly
 pipeline = (
     raw                         # Bucket
     .transform(extract)         # PendingTransform
@@ -1182,16 +1542,49 @@ pipeline = (
 result = pipeline.run(mode="local")
 ```
 
+### Core Pattern: Multi-Source
+
+```python
+from glacier import Pipeline
+
+# 1. Define storage
+sales = provider.bucket(bucket="data", path="sales.parquet")
+customers = provider.bucket(bucket="data", path="customers.parquet")
+joined = provider.bucket(bucket="data", path="joined.parquet")
+output = provider.bucket(bucket="data", path="output.parquet")
+
+# 2. Define multi-source task
+@spark_exec.task()
+def join_data(sales_df: pl.LazyFrame, customers_df: pl.LazyFrame) -> pl.LazyFrame:
+    return sales_df.join(customers_df, on="customer_id")
+
+@local_exec.task()
+def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
+    return df.group_by("region").agg(pl.col("revenue").sum())
+
+# 3. Use Pipeline for multi-source, then chain normally
+pipeline = (
+    Pipeline(sales_df=sales, customers_df=customers)  # Multi-source
+    .transform(join_data)                              # Join
+    .to(joined)                                        # Returns Bucket!
+    .transform(aggregate)                              # Single-source chaining
+    .to(output)
+)
+
+# 4. Execute
+result = pipeline.run(mode="cloud")
+```
+
 ### Key Innovation
 
-**Storage is the fundamental unit** - Buckets are chainable, all storage is equal, no special-cased "source", no Pipeline factory object.
+**Storage is the fundamental unit** - Buckets are chainable for single-source, Pipeline handles multi-source then returns Bucket for continued chaining.
 
 ### Benefits
 
-✅ **Simpler** - No Pipeline() factory needed
+✅ **Simpler** - Use chainable buckets for single-source (most common)
 ✅ **More consistent** - All buckets treated equally
 ✅ **More intuitive** - Data flow is clear: bucket → transform → bucket
-✅ **More flexible** - Start with any bucket, compose dynamically
+✅ **Flexible** - Pipeline for multi-source, returns Bucket for continued chaining
 ✅ **Explicit storage** - Every `.to()` is a materialization point
 ✅ **Lineage tracking** - Buckets know how they're produced
 ✅ **Matches physical reality** - Storage is how executors communicate
@@ -1199,12 +1592,14 @@ result = pipeline.run(mode="local")
 ### Key Classes
 
 - **Bucket** - Storage resource (chainable via `.transform()`)
-- **PendingTransform** - Transform awaiting target (via `.to()`)
-- **TransformStep** - Source → task → target (lineage element)
+- **PendingTransform** - Single-source transform awaiting target (via `.to()`)
+- **Pipeline** - Multi-source builder (`Pipeline(s1=b1, s2=b2)`)
+- **PipelinePendingTransform** - Multi-source transform awaiting target
+- **TransformStep** - Single-source lineage element (source → task → target)
+- **MultiSourceTransformStep** - Multi-source lineage element (sources → task → target)
 - **Task** - Reusable task definition (from decorator)
-- **TaskInstance** - Executable step in DAG
+- **TaskInstance** - Executable step in DAG (supports both single and multi-source)
 - **DAG** - Dependencies based on source/target relationships
-- **Pipeline** - Optional compatibility class
 
 ---
 
