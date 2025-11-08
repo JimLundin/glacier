@@ -1,214 +1,165 @@
 """
-Task decorator and Task class for Glacier pipelines.
+Task: Functions decorated with @task become pipeline tasks.
+
+Tasks are the logic units in a pipeline. They:
+- Take datasets as inputs (via function parameters)
+- Produce datasets as outputs (via return type)
+- Declare execution context (via decorator parameters)
 """
 
 import inspect
-from functools import wraps
-from typing import Callable, Any, get_type_hints, TYPE_CHECKING
-from dataclasses import dataclass, field
-import polars as pl
+from typing import Callable, List, Optional, Any, get_type_hints, get_origin, get_args
+from dataclasses import dataclass
 
-if TYPE_CHECKING:
-    from glacier.resources.execution import ExecutionResource
-
-
-@dataclass
-class TaskMetadata:
-    """Metadata about a task for DAG construction and analysis."""
-
-    name: str
-    func: Callable
-    depends_on: list["Task"] = field(default_factory=list)
-    executor: "ExecutionResource | str | None" = None
-    description: str | None = None
-    inputs: dict = field(default_factory=dict)
-    outputs: dict = field(default_factory=dict)
+from glacier.core.dataset import Dataset
 
 
 class Task:
     """
-    Represents a computational task in a Glacier pipeline.
+    A Task wraps a user function and extracts metadata from its signature.
 
-    Tasks are nodes in the DAG and represent transformations or operations
-    on data. They can depend on other tasks and can be analyzed at compile
-    time to understand infrastructure requirements.
+    The function signature declares:
+    - Input datasets (parameter type annotations)
+    - Output datasets (return type annotation)
 
-    Tasks are created by the @executor.task() decorator and are bound to
-    execution resources (not strings).
-
-    Example:
-        provider = Provider(config=AwsConfig(region="us-east-1"))
-        local_exec = provider.local()
-
-        @local_exec.task()
-        def process_data(df: pl.LazyFrame) -> pl.LazyFrame:
-            return df.filter(pl.col("value") > 0)
+    The decorator declares:
+    - Execution context (compute, retries, timeout, etc.)
     """
 
-    def __init__(
-        self,
-        func: Callable,
-        name: str | None = None,
-        depends_on: list["Task"] | None = None,
-        executor: "ExecutionResource | str | None" = None,
-        **config: Any,
-    ):
+    def __init__(self, fn: Callable, **config):
         """
-        Initialize a Task.
+        Create a task from a function.
 
         Args:
-            func: The function to wrap
-            name: Optional task name (defaults to function name)
-            depends_on: List of Task objects this task depends on (NOT strings)
-            executor: Execution resource object (preferred) or string (legacy)
-            **config: Additional task configuration
+            fn: The function to wrap
+            **config: Execution configuration (compute, retries, timeout, etc.)
         """
-        self.func = func
-        self.name = name or func.__name__
-        self.depends_on = depends_on or []
-        self.executor = executor
+        self.fn = fn
+        self.name = fn.__name__
         self.config = config
 
-        # Store the original function signature for introspection
-        self.signature = inspect.signature(func)
-        self._type_hints = get_type_hints(func) if hasattr(func, "__annotations__") else {}
+        # Extract signature information
+        self.signature = inspect.signature(fn)
+        self._extract_datasets()
 
-        self.metadata = self._extract_metadata()
-
-    def _extract_metadata(self) -> TaskMetadata:
-        """Extract metadata from the function for analysis."""
-        return TaskMetadata(
-            name=self.name,
-            func=self.func,
-            depends_on=self.depends_on,
-            executor=self.executor,
-            description=inspect.getdoc(self.func),
-            inputs=self._type_hints,
-            outputs=self._type_hints.get("return", Any),
-        )
-
-    def get_executor_type(self) -> str:
+    def _extract_datasets(self):
         """
-        Get the executor type string.
+        Extract input and output datasets from function signature.
 
-        Returns:
-            Executor type string ("local", "serverless", "cluster", "vm")
+        Looks at type annotations to find Dataset instances.
         """
-        if isinstance(self.executor, str):
-            return self.executor
-        elif hasattr(self.executor, "get_executor_type"):
-            return self.executor.get_executor_type()
-        else:
-            return "local"
+        self.inputs: List[DatasetParameter] = []
+        self.outputs: List[Dataset] = []
 
-    def __call__(self, *args, **kwargs) -> Any:
-        """Execute the task function."""
-        return self.func(*args, **kwargs)
+        # Get type hints
+        try:
+            hints = get_type_hints(self.fn)
+        except Exception:
+            # If we can't get hints, try manual inspection
+            hints = {}
+            for param_name, param in self.signature.parameters.items():
+                if param.annotation != inspect.Parameter.empty:
+                    hints[param_name] = param.annotation
 
-    def get_sources(self) -> list:
-        """
-        Extract sources from the task's signature.
-
-        This is used at compile time to understand what data sources
-        this task depends on.
-        """
-        from glacier.sources.base import Source
-
-        sources = []
+        # Extract input datasets from parameters
         for param_name, param in self.signature.parameters.items():
-            # Check if parameter type is a Source subclass
-            param_type = self._type_hints.get(param_name)
-            if param_type and (
-                (inspect.isclass(param_type) and issubclass(param_type, Source))
-                or isinstance(param_type, Source)
-            ):
-                sources.append(param_name)
-        return sources
+            if param_name == 'self' or param_name == 'ctx':
+                # Skip 'self' for methods and 'ctx' for context
+                continue
 
-    def get_dependency_names(self) -> list[str]:
-        """Get names of tasks this task depends on."""
-        return [task.name for task in self.depends_on]
+            annotation = hints.get(param_name)
+            if annotation and isinstance(annotation, Dataset):
+                self.inputs.append(DatasetParameter(
+                    name=param_name,
+                    dataset=annotation
+                ))
 
-    def __repr__(self) -> str:
-        deps = [t.name for t in self.depends_on]
-        executor_type = self.get_executor_type()
-        return f"Task(name='{self.name}', executor='{executor_type}', depends_on={deps})"
+        # Extract output datasets from return annotation
+        return_annotation = hints.get('return')
+        if return_annotation:
+            if isinstance(return_annotation, Dataset):
+                # Single output
+                self.outputs.append(return_annotation)
+            elif get_origin(return_annotation) is tuple:
+                # Multiple outputs: Tuple[dataset_a, dataset_b]
+                args = get_args(return_annotation)
+                for arg in args:
+                    if isinstance(arg, Dataset):
+                        self.outputs.append(arg)
 
+    def __repr__(self):
+        inputs_str = ", ".join(f"{p.name}: {p.dataset.name}" for p in self.inputs)
+        outputs_str = ", ".join(d.name for d in self.outputs)
+        return f"Task({self.name}, inputs=[{inputs_str}], outputs=[{outputs_str}])"
 
-class TaskInstance:
-    """
-    Executable instance of a task.
-
-    Represents: sources → transform → target
-
-    This is created from TransformStep in the fluent pipeline API.
-    """
-
-    def __init__(
-        self,
-        task: Task,
-        sources: dict[str, Any],
-        target: Any,
-        name: str,
-    ):
+    def execute(self, **input_datasets) -> Any:
         """
-        Initialize a TaskInstance.
+        Execute this task with the given input datasets.
 
         Args:
-            task: Task to execute
-            sources: Dictionary mapping parameter names to Bucket sources
-            target: Target Bucket to write to
-            name: Instance name
-        """
-        self.task = task
-        self.sources = sources
-        self.target = target
-        self.name = name
-        self.dependencies: list["TaskInstance"] = []
-
-    def execute(self, context: Any = None) -> Any:
-        """
-        Execute this task instance.
-
-        Steps:
-        1. Read from source(s)
-        2. Execute task function
-        3. Write to target
-
-        Args:
-            context: Optional execution context
+            **input_datasets: Mapping of parameter names to dataset values
 
         Returns:
-            Result of the task execution
+            The output dataset value(s)
         """
-        # Load all sources as LazyFrames
-        source_dfs = {
-            name: bucket.scan() for name, bucket in self.sources.items()
-        }
+        # Prepare arguments for the function
+        kwargs = {}
+        for param in self.inputs:
+            if param.name in input_datasets:
+                kwargs[param.name] = input_datasets[param.name]
+            else:
+                raise ValueError(
+                    f"Task '{self.name}' requires input '{param.name}' "
+                    f"(dataset '{param.dataset.name}') but it was not provided"
+                )
 
-        # Call task with named arguments
-        result = self.task.func(**source_dfs)
+        # Execute the function
+        return self.fn(**kwargs)
 
-        # Write to target
-        if result is not None and hasattr(result, "collect"):
-            result.collect().write_parquet(self.target.get_uri())
-
-        return result
-
-    def __repr__(self) -> str:
-        return f"TaskInstance(name='{self.name}', task='{self.task.name}')"
+    def get_compute(self):
+        """Get the compute resource for this task"""
+        return self.config.get('compute')
 
 
-# Global task decorator has been removed.
-# Use execution resource-bound tasks instead: @executor.task()
-#
-# Example:
-#   from glacier import Provider
-#   from glacier.config import AwsConfig
-#
-#   provider = Provider(config=AwsConfig(region="us-east-1"))
-#   local_exec = provider.local()
-#
-#   @local_exec.task()
-#   def my_task(source) -> pl.LazyFrame:
-#       return source.scan()
+@dataclass
+class DatasetParameter:
+    """Represents a dataset input parameter to a task"""
+    name: str  # Parameter name
+    dataset: Dataset  # The dataset instance
+
+
+def task(fn: Optional[Callable] = None, **config) -> Task:
+    """
+    Decorator to mark a function as a pipeline task.
+
+    The function signature declares data dependencies:
+    - Parameters typed with Dataset instances are inputs
+    - Return type with Dataset instance(s) are outputs
+
+    The decorator can specify execution configuration:
+    - compute: Compute resource to use
+    - retries: Retry configuration
+    - timeout: Execution timeout
+    - etc.
+
+    Example:
+        raw_data = Dataset("raw_data")
+        clean_data = Dataset("clean_data")
+
+        @task(compute=compute.local())
+        def clean(input: raw_data) -> clean_data:
+            return process(input)
+
+    Args:
+        fn: The function to decorate (when used without arguments)
+        **config: Execution configuration
+
+    Returns:
+        Task instance wrapping the function
+    """
+    if fn is None:
+        # Called with arguments: @task(compute=...)
+        return lambda f: Task(f, **config)
+    else:
+        # Called without arguments: @task
+        return Task(fn, **config)

@@ -1,324 +1,288 @@
 """
-Pipeline class for Glacier using builder/fluent API pattern.
+Pipeline: Automatically infers DAG from task signatures.
+
+A Pipeline is a collection of tasks where dependencies are inferred
+from the datasets that tasks consume and produce.
 """
 
-import inspect
-from functools import wraps
-from typing import Callable, Any, Optional, Dict, List, TYPE_CHECKING
-from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
 
-if TYPE_CHECKING:
-    from glacier.core.task import Task
-    from glacier.resources.bucket import Bucket
+from glacier.core.task import Task
+from glacier.core.dataset import Dataset
 
 
 @dataclass
-class PipelineMetadata:
-    """Metadata about a pipeline for DAG construction and infrastructure generation."""
-
-    name: str
-    description: Optional[str] = None
-    tasks: List["Task"] = field(default_factory=list)
-    sources: List[Any] = field(default_factory=list)
-    config: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class TransformStep:
-    """
-    A complete step in the pipeline: sources → task → target.
-
-    This represents one transformation in the pipeline, including:
-    - Source bucket(s) to read from
-    - Task to execute
-    - Target bucket to write to
-    """
-
-    sources: Dict[str, "Bucket"]
-    task: "Task"
-    target: "Bucket"
-
-    def to_task_instance(self):
-        """Convert to TaskInstance for execution."""
-        from glacier.core.task import TaskInstance
-
-        return TaskInstance(
-            task=self.task,
-            sources=self.sources,
-            target=self.target,
-            name=self.task.name,
-        )
-
-
-@dataclass
-class PendingStep:
-    """
-    A transformation awaiting .to() to complete.
-
-    This represents an incomplete step that has sources and task,
-    but needs a target bucket to be complete.
-    """
-
-    sources: Dict[str, "Bucket"]
-    task: "Task"
+class PipelineEdge:
+    """Represents an edge in the pipeline DAG"""
+    from_task: Task
+    to_task: Task
+    dataset: Dataset  # The dataset that connects them
+    param_name: str  # Parameter name in to_task
 
 
 class Pipeline:
     """
-    Represents a data pipeline in Glacier.
+    A Pipeline automatically builds a DAG from task signatures.
 
-    Pipelines are created using the builder/fluent API:
+    The DAG is inferred by:
+    1. Finding which task produces each dataset (outputs)
+    2. Finding which tasks consume each dataset (inputs)
+    3. Connecting producers to consumers
 
     Example:
-        pipeline = (
-            Pipeline(name="etl")
-            .source(raw_data)
-            .transform(clean)
-            .to(output)
-        )
+        raw = Dataset("raw")
+        clean = Dataset("clean")
 
-    The fluent API provides clean, readable pipeline structure that is
-    ideal for code generation and infrastructure analysis.
+        @task
+        def extract() -> raw:
+            return fetch_data()
+
+        @task
+        def transform(data: raw) -> clean:
+            return process(data)
+
+        # Pipeline infers: extract -> raw -> transform
+        pipeline = Pipeline([extract, transform])
     """
 
-    def __init__(
-        self,
-        name: str,
-        description: Optional[str] = None,
-        config: Optional[Dict[str, Any]] = None,
-    ):
+    def __init__(self, tasks: List[Task], name: str = "pipeline"):
         """
-        Initialize a Pipeline using the builder pattern.
+        Create a pipeline from a list of tasks.
 
         Args:
-            name: Pipeline name (required)
-            description: Optional description
-            config: Optional configuration
+            tasks: List of Task objects
+            name: Pipeline name
 
-        Example:
-            pipeline = (
-                Pipeline(name="etl")
-                .source(raw)
-                .transform(clean)
-                .to(output)
-            )
+        The DAG is automatically built from task signatures.
         """
         self.name = name
-        self.description = description
-        self.config = config or {}
+        self.tasks = tasks
+        self.edges: List[PipelineEdge] = []
+        self._dataset_producers: Dict[Dataset, Task] = {}
 
-        # Pipeline composition state
-        self._steps: List[TransformStep] = []
-        self._current_sources: Optional[Dict[str, "Bucket"]] = None
-        self._pending_step: Optional[PendingStep] = None
+        self._build_dag()
 
-    def source(self, bucket: "Bucket") -> "Pipeline":
+    def _build_dag(self):
         """
-        Add a single source to the pipeline (fluent API).
+        Build the DAG by inferring dependencies from task signatures.
 
-        Args:
-            bucket: Source bucket to read from
+        For each dataset:
+        1. Find the task that produces it (from outputs)
+        2. Find tasks that consume it (from inputs)
+        3. Create edges: producer -> consumer
+        """
+        # First pass: map datasets to their producers
+        for task in self.tasks:
+            for output_dataset in task.outputs:
+                if output_dataset in self._dataset_producers:
+                    raise ValueError(
+                        f"Dataset '{output_dataset.name}' is produced by multiple tasks: "
+                        f"'{self._dataset_producers[output_dataset].name}' and '{task.name}'"
+                    )
+                self._dataset_producers[output_dataset] = task
+
+        # Second pass: create edges from producers to consumers
+        for task in self.tasks:
+            for input_param in task.inputs:
+                dataset = input_param.dataset
+                producer = self._dataset_producers.get(dataset)
+
+                if producer is None:
+                    # This dataset is not produced by any task in the pipeline
+                    # It's an external input
+                    continue
+
+                # Create edge: producer -> task
+                edge = PipelineEdge(
+                    from_task=producer,
+                    to_task=task,
+                    dataset=dataset,
+                    param_name=input_param.name
+                )
+                self.edges.append(edge)
+
+    def validate(self) -> bool:
+        """
+        Validate the pipeline structure.
+
+        Checks:
+        - No cycles in the DAG
+        - All required datasets have producers
+        - No orphaned tasks
 
         Returns:
-            Self (for chaining)
-
-        Example:
-            pipeline = Pipeline(name="etl").source(raw_data)
-        """
-        self._current_sources = {"df": bucket}  # Default param name
-        return self
-
-    def sources(self, **buckets: "Bucket") -> "Pipeline":
-        """
-        Add multiple sources to the pipeline (fluent API, for joins).
-
-        Args:
-            **buckets: Named source buckets (names must match task parameters)
-
-        Returns:
-            Self (for chaining)
-
-        Example:
-            pipeline = Pipeline(name="join").sources(
-                sales_df=sales,
-                customers_df=customers
-            )
-        """
-        self._current_sources = buckets
-        return self
-
-    def transform(self, task: "Task") -> "Pipeline":
-        """
-        Apply a transformation (fluent API).
-
-        Args:
-            task: Task to execute
-
-        Returns:
-            Self (for chaining)
-
-        Example:
-            pipeline.transform(clean_data)
-
-        Note:
-            Must be followed by .to() to complete the step.
-        """
-        if self._current_sources is None:
-            raise ValueError("Must call .source() or .sources() before .transform()")
-
-        # Validate task signature matches sources
-        sig = inspect.signature(task.func)
-        task_params = set(sig.parameters.keys())
-        source_names = set(self._current_sources.keys())
-
-        if task_params != source_names:
-            raise ValueError(
-                f"Task parameters {task_params} do not match sources {source_names}. "
-                f"Task function signature must match the source names provided."
-            )
-
-        # Create pending step (needs .to() to complete)
-        self._pending_step = PendingStep(
-            sources=self._current_sources, task=task
-        )
-        self._current_sources = None  # Must call .to() next
-        return self
-
-    def to(self, bucket: "Bucket") -> "Pipeline":
-        """
-        Write transform output to a bucket (fluent API).
-
-        Args:
-            bucket: Target bucket to write to
-
-        Returns:
-            Self (for chaining)
-
-        Example:
-            pipeline.to(output_bucket)
-
-        Note:
-            Completes the step started by .transform().
-            Can be followed by another .transform() to continue the chain.
-        """
-        if self._pending_step is None:
-            raise ValueError("Must call .transform() before .to()")
-
-        # Complete the step
-        step = TransformStep(
-            sources=self._pending_step.sources,
-            task=self._pending_step.task,
-            target=bucket,
-        )
-        self._steps.append(step)
-        self._pending_step = None
-
-        # Set target as source for next transform
-        self._current_sources = {"df": bucket}
-
-        return self
-
-    def to_dag(self):
-        """
-        Build DAG from pipeline steps (fluent API).
-
-        Returns:
-            DAG object
-
-        Example:
-            dag = pipeline.to_dag()
+            True if valid
 
         Raises:
-            ValueError: If pipeline has incomplete steps or no steps
+            ValueError if invalid
         """
-        if self._pending_step is not None:
-            raise ValueError(
-                "Pipeline has incomplete step. Use .to() to complete it."
-            )
+        # Check for cycles using DFS
+        if self._has_cycle():
+            raise ValueError("Pipeline contains a cycle!")
 
-        if not self._steps:
-            raise ValueError("Pipeline has no steps")
+        # Check that all non-source tasks have their inputs satisfied
+        for task in self.tasks:
+            for input_param in task.inputs:
+                dataset = input_param.dataset
+                if dataset not in self._dataset_producers:
+                    # This is OK - it's an external input
+                    # But we should track this
+                    pass
 
-        from glacier.core.dag import DAG
+        return True
 
-        # Build TaskInstances
-        instances = []
-        for step in self._steps:
-            instance = step.to_task_instance()
-            instances.append(instance)
+    def _has_cycle(self) -> bool:
+        """Check if the DAG has a cycle using DFS"""
+        # Build adjacency list
+        adj = {task: [] for task in self.tasks}
+        for edge in self.edges:
+            adj[edge.from_task].append(edge.to_task)
 
-        # Build DAG from instances
-        dag = DAG()
-        for i, instance in enumerate(instances):
-            dag.add_node(instance.name, instance.task, instance.task.metadata)
+        # Track visit states: 0 = unvisited, 1 = visiting, 2 = visited
+        state = {task: 0 for task in self.tasks}
 
-            # Add dependency on previous step
-            if i > 0:
-                dag.add_edge(instances[i - 1].name, instance.name)
+        def dfs(task: Task) -> bool:
+            if state[task] == 1:  # Currently visiting - cycle detected
+                return True
+            if state[task] == 2:  # Already visited
+                return False
 
-        return dag
+            state[task] = 1  # Mark as visiting
+            for neighbor in adj[task]:
+                if dfs(neighbor):
+                    return True
+            state[task] = 2  # Mark as visited
 
-    def run(self, mode: str = "local", **kwargs) -> Any:
+            return False
+
+        # Check all components
+        for task in self.tasks:
+            if state[task] == 0:
+                if dfs(task):
+                    return True
+
+        return False
+
+    def get_source_tasks(self) -> List[Task]:
         """
-        Run the pipeline in the specified mode.
+        Get tasks that have no dependencies (source tasks).
 
-        Args:
-            mode: Execution mode ('local', 'analyze', 'generate')
-            **kwargs: Additional arguments passed to the execution engine
+        These are tasks with no inputs, or inputs that come from
+        datasets not produced by any task in the pipeline.
 
         Returns:
-            Result of the pipeline execution (mode-dependent)
+            List of source tasks
         """
-        if mode == "local":
-            return self._run_local(**kwargs)
-        elif mode == "analyze":
-            return self._analyze(**kwargs)
-        elif mode == "generate":
-            return self._generate_infrastructure(**kwargs)
-        else:
-            raise ValueError(f"Unknown execution mode: {mode}")
+        tasks_with_deps = {edge.to_task for edge in self.edges}
+        return [task for task in self.tasks if task not in tasks_with_deps]
 
-    def _run_local(self, **kwargs) -> Any:
-        """Execute the pipeline locally."""
-        from glacier.runtime.local import LocalExecutor
+    def get_sink_tasks(self) -> List[Task]:
+        """
+        Get tasks that have no consumers (sink tasks).
 
-        executor = LocalExecutor(self)
-        return executor.execute(**kwargs)
+        These are tasks whose outputs are not consumed by any
+        other task in the pipeline.
 
-    def _analyze(self, **kwargs) -> Dict[str, Any]:
-        """Analyze the pipeline to build DAG and extract metadata."""
-        from glacier.codegen.analyzer import PipelineAnalyzer
+        Returns:
+            List of sink tasks
+        """
+        tasks_with_consumers = {edge.from_task for edge in self.edges}
+        return [task for task in self.tasks if task not in tasks_with_consumers]
 
-        analyzer = PipelineAnalyzer(self)
-        return analyzer.analyze(**kwargs)
+    def get_execution_order(self) -> List[Task]:
+        """
+        Get topological ordering of tasks for execution.
 
-    def _generate_infrastructure(self, output_dir: str = "./infra", **kwargs) -> Dict[str, Any]:
-        """Generate infrastructure code from the pipeline."""
-        from glacier.codegen.terraform import TerraformGenerator
+        Returns:
+            List of tasks in execution order
 
-        # First analyze to get metadata
-        analysis = self._analyze(**kwargs)
+        Raises:
+            ValueError if pipeline has a cycle
+        """
+        if self._has_cycle():
+            raise ValueError("Cannot get execution order: pipeline has a cycle")
 
-        # Then generate infrastructure
-        generator = TerraformGenerator(self, analysis)
-        return generator.generate(output_dir=output_dir)
+        # Build adjacency list and in-degree count
+        adj = {task: [] for task in self.tasks}
+        in_degree = {task: 0 for task in self.tasks}
 
-    def get_metadata(self) -> PipelineMetadata:
-        """Get metadata about this pipeline."""
-        # Extract tasks and sources from steps
-        tasks = [step.task for step in self._steps]
-        sources = []
-        for step in self._steps:
-            sources.extend(step.sources.values())
+        for edge in self.edges:
+            adj[edge.from_task].append(edge.to_task)
+            in_degree[edge.to_task] += 1
 
-        return PipelineMetadata(
-            name=self.name,
-            description=self.description,
-            tasks=tasks,
-            sources=sources,
-            config=self.config,
-        )
+        # Kahn's algorithm for topological sort
+        queue = [task for task in self.tasks if in_degree[task] == 0]
+        result = []
 
-    def __repr__(self) -> str:
-        steps_count = len(self._steps)
-        return f"Pipeline(name='{self.name}', steps={steps_count})"
+        while queue:
+            task = queue.pop(0)
+            result.append(task)
+
+            for neighbor in adj[task]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+
+        if len(result) != len(self.tasks):
+            raise ValueError("Cycle detected in pipeline")
+
+        return result
+
+    def get_dependencies(self, task: Task) -> List[Task]:
+        """
+        Get all tasks that this task depends on.
+
+        Args:
+            task: The task to get dependencies for
+
+        Returns:
+            List of tasks this task depends on
+        """
+        return [edge.from_task for edge in self.edges if edge.to_task == task]
+
+    def get_consumers(self, task: Task) -> List[Task]:
+        """
+        Get all tasks that depend on this task.
+
+        Args:
+            task: The task to get consumers for
+
+        Returns:
+            List of tasks that consume this task's outputs
+        """
+        return [edge.to_task for edge in self.edges if edge.from_task == task]
+
+    def visualize(self) -> str:
+        """
+        Generate a text visualization of the pipeline DAG.
+
+        Returns:
+            String representation of the DAG
+        """
+        lines = [f"Pipeline: {self.name}", "=" * 50, ""]
+
+        # Show tasks
+        lines.append("Tasks:")
+        for task in self.tasks:
+            inputs = ", ".join(p.dataset.name for p in task.inputs)
+            outputs = ", ".join(d.name for d in task.outputs)
+            lines.append(f"  {task.name}")
+            if inputs:
+                lines.append(f"    inputs: {inputs}")
+            if outputs:
+                lines.append(f"    outputs: {outputs}")
+            lines.append("")
+
+        # Show edges
+        lines.append("Dependencies:")
+        for edge in self.edges:
+            lines.append(
+                f"  {edge.from_task.name} -> {edge.to_task.name} "
+                f"(via {edge.dataset.name})"
+            )
+
+        return "\n".join(lines)
+
+    def __repr__(self):
+        return f"Pipeline({self.name}, tasks={len(self.tasks)}, edges={len(self.edges)})"

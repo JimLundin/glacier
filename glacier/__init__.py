@@ -1,80 +1,51 @@
 """
-Glacier: Code-centric data pipeline library with infrastructure-from-code generation.
+Glacier: Infrastructure-from-code data pipeline library.
 
-⚠️ **ALPHA SOFTWARE** - API may change. No backwards compatibility guarantees until v1.0.
+Glacier provides a declarative, type-safe way to define data pipelines
+where infrastructure and logic are defined together.
 
-Glacier provides cloud-agnostic abstractions for building data pipelines that can
-run on any cloud platform (AWS, Azure, GCP) or locally using dependency injection
-and resource-centric design.
+Core concepts:
+- Dataset: Named data artifacts that flow through the pipeline
+- Task: Functions decorated with @task that consume/produce datasets
+- Pipeline: Automatically infers DAG from task signatures
+- Compute: Provider-agnostic execution resources
 
-Key concepts:
-- Provider: SINGLE class that adapts based on config injection (NO provider subclasses!)
-- Config: Configuration classes (AwsConfig, GcpConfig, etc.) determine provider behavior
-- Resources: Generic abstractions (Bucket, ExecutionResource) that work across clouds
-- Tasks: Created via @executor.task() decorators on execution resources
-- Pipelines: Composed using builder/fluent API pattern
+Example:
+    from glacier import Dataset, task, Pipeline, compute
 
-Builder Pattern (Pipeline Composition):
-    from glacier import Provider, Pipeline
-    from glacier.config import AwsConfig
-    import polars as pl
+    # Declare datasets
+    raw_data = Dataset("raw_data")
+    clean_data = Dataset("clean_data")
 
-    # 1. Create provider with config injection
-    provider = Provider(config=AwsConfig(region="us-east-1"))
+    # Define tasks with type hints
+    @task(compute=compute.local())
+    def extract() -> raw_data:
+        return fetch_from_api()
 
-    # 2. Create execution resources
-    local_exec = provider.local()
-    lambda_exec = provider.serverless(config=LambdaConfig(memory=1024))
+    @task(compute=compute.serverless(memory=1024))
+    def transform(data: raw_data) -> clean_data:
+        return process(data)
 
-    # 3. Create storage resources
-    raw_data = provider.bucket(bucket="data", path="raw.parquet")
-    filtered_data = provider.bucket(bucket="data", path="filtered.parquet")
-    output_data = provider.bucket(bucket="data", path="output.parquet")
+    # Pipeline automatically infers DAG from signatures
+    pipeline = Pipeline([extract, transform], name="etl")
 
-    # 4. Define tasks bound to execution resources
-    @local_exec.task()
-    def filter_positive(df: pl.LazyFrame) -> pl.LazyFrame:
-        return df.filter(pl.col("value") > 0)
+    # Run locally
+    pipeline.run()
 
-    @lambda_exec.task()
-    def aggregate(df: pl.LazyFrame) -> pl.LazyFrame:
-        return df.group_by("category").agg(pl.col("value").sum())
-
-    # 5. Build pipeline using fluent API
-    pipeline = (
-        Pipeline(name="etl")
-        .source(raw_data)
-        .transform(filter_positive)
-        .to(filtered_data)
-        .transform(aggregate)
-        .to(output_data)
-    )
-
-    # 6. Generate DAG or execute
-    dag = pipeline.to_dag()
+    # Or generate infrastructure
+    pipeline.to_terraform("./infra")
 """
 
-from glacier.core.context import GlacierContext
+from glacier.core.dataset import Dataset
+from glacier.core.task import task, Task
 from glacier.core.pipeline import Pipeline
-from glacier.providers import Provider
+import glacier.compute as compute
 
-# Re-export commonly used modules for convenience
-from glacier import resources
-from glacier import config
-
-# GlacierEnv is kept for advanced use cases but not in primary API
-from glacier.core.env import GlacierEnv
-
-__version__ = "0.1.0-alpha"
+__version__ = "0.2.0-alpha"
 __all__ = [
-    # Core classes (primary API)
-    "Provider",
+    "Dataset",
+    "task",
+    "Task",
     "Pipeline",
-    # Context
-    "GlacierContext",
-    # Modules
-    "resources",
-    "config",
-    # Advanced (not recommended for most users)
-    "GlacierEnv",
+    "compute",
 ]

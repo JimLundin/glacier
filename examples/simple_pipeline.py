@@ -1,119 +1,88 @@
 """
-Simple pipeline demonstrating Glacier's execution resource pattern.
+Simple ETL Pipeline Example
 
-This pipeline:
-1. Loads data from local storage
-2. Filters out null values
-3. Aggregates by category
-4. Returns the result
-
-CORRECT PATTERN:
-- Provider creates BOTH storage AND execution resources
-- Tasks bound to execution resources: @executor.task()
-- Storage: provider.bucket()
-- Execution: provider.local(), provider.serverless(), provider.vm(), provider.cluster()
-
-Run with:
-    python examples/simple_pipeline.py
+Demonstrates the basic pattern:
+- Declare datasets
+- Define tasks with type hints
+- Pipeline automatically infers DAG
 """
 
-from glacier import Provider, pipeline
-from glacier.config import LocalConfig
-import polars as pl
-
-# ============================================================================
-# 1. SETUP: Create provider and resources
-# ============================================================================
-
-# Provider configuration determines WHERE DATA LIVES
-provider = Provider(config=LocalConfig(base_path="./examples/data"))
-
-# Create EXECUTION resource (where code runs)
-# This is a first-class resource, just like storage
-local_exec = provider.local()
-
-# Create STORAGE resource (where data lives)
-data_source = provider.bucket(bucket="examples/data", path="sample.parquet")
-
-# ============================================================================
-# 2. TASKS: Bind tasks to execution resources
-# ============================================================================
+from glacier import Dataset, task, Pipeline, compute
 
 
-@local_exec.task()
-def load_data(source) -> pl.LazyFrame:
-    """Load data from source. Executes on local_exec."""
-    return source.scan()
+# 1. Declare datasets
+raw_users = Dataset("raw_users")
+clean_users = Dataset("clean_users")
+user_metrics = Dataset("user_metrics")
 
 
-@local_exec.task()
-def clean_data(df: pl.LazyFrame) -> pl.LazyFrame:
-    """Remove null values. Executes on local_exec."""
-    return df.filter(pl.col("value").is_not_null() & pl.col("category").is_not_null())
+# 2. Define tasks - signatures declare data flow
+@task(compute=compute.local())
+def extract_users() -> raw_users:
+    """Extract users from API"""
+    print("Extracting users from API...")
+    # Simulate API call
+    data = [
+        {"id": 1, "name": "Alice", "age": 30},
+        {"id": 2, "name": "Bob", "age": 25},
+        {"id": 3, "name": "Charlie", "age": 35},
+    ]
+    return data
 
 
-@local_exec.task()
-def aggregate_by_category(df: pl.LazyFrame) -> pl.LazyFrame:
-    """Aggregate by category. Executes on local_exec."""
-    return df.group_by("category").agg(
-        [
-            pl.col("value").sum().alias("total_value"),
-            pl.col("value").mean().alias("avg_value"),
-            pl.count().alias("count"),
-        ]
-    )
+@task(compute=compute.local())
+def clean_users(users: raw_users) -> clean_users:
+    """Clean and validate user data"""
+    print(f"Cleaning {len(users)} users...")
+    # Simple cleaning - uppercase names
+    cleaned = [
+        {**user, "name": user["name"].upper()}
+        for user in users
+    ]
+    return cleaned
 
 
-# ============================================================================
-# 3. PIPELINE: Wire tasks together
-# ============================================================================
+@task(compute=compute.serverless(memory=512))
+def compute_metrics(users: clean_users) -> user_metrics:
+    """Compute user metrics"""
+    print(f"Computing metrics for {len(users)} users...")
+    metrics = {
+        "total_users": len(users),
+        "average_age": sum(u["age"] for u in users) / len(users),
+    }
+    return metrics
 
 
-@pipeline(name="simple_etl")
-def simple_pipeline():
-    """
-    Simple ETL pipeline.
+# 3. Create pipeline - DAG inferred from signatures
+# extract_users() -> raw_users -> clean_users() -> clean_users -> compute_metrics()
+pipeline = Pipeline(
+    tasks=[extract_users, clean_users, compute_metrics],
+    name="user-analytics"
+)
 
-    All tasks execute on local_exec (local Python process).
-    Data is read from local filesystem (determined by provider config).
-    """
-    raw_data = load_data(data_source)
-    cleaned_data = clean_data(raw_data)
-    result = aggregate_by_category(cleaned_data)
-    return result
-
-
-# ============================================================================
-# 4. EXECUTION
-# ============================================================================
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("Simple ETL Pipeline")
-    print("=" * 60)
-    print(f"\nData Location: Local filesystem (./examples/data)")
-    print(f"Code Execution: Local Python process")
-    print(f"Provider: {provider}")
+    # Validate the pipeline
+    print("Pipeline:")
+    print(pipeline)
+    print()
 
-    print("\n" + "=" * 60)
-    print("Glacier Resource Pattern")
-    print("=" * 60)
-    print("\n✓ Provider creates resources:")
-    print("  - Storage: provider.bucket() → where data lives")
-    print("  - Execution: provider.local() → where code runs")
-    print("\n✓ Both are first-class resources:")
-    print("  - Storage passed to tasks as parameters")
-    print("  - Execution binds tasks via @executor.task()")
-    print("\n✓ Cloud-agnostic:")
-    print("  - Same pattern for all clouds")
-    print("  - Config determines actual backend")
+    # Show the DAG
+    print(pipeline.visualize())
+    print()
 
-    # Run the pipeline
-    print("\n" + "=" * 60)
-    print("Running pipeline...")
-    print("=" * 60)
-    result = simple_pipeline.run(mode="local")
+    # Validate structure
+    print("Validating pipeline...")
+    pipeline.validate()
+    print("✓ Pipeline is valid!")
+    print()
 
-    print("\nPipeline Result:")
-    print(result.collect())
-    print("\n✓ Pipeline completed successfully!")
+    # Show execution order
+    print("Execution order:")
+    for i, task in enumerate(pipeline.get_execution_order(), 1):
+        print(f"  {i}. {task.name}")
+    print()
+
+    # Show source and sink tasks
+    print(f"Source tasks: {[t.name for t in pipeline.get_source_tasks()]}")
+    print(f"Sink tasks: {[t.name for t in pipeline.get_sink_tasks()]}")
