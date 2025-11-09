@@ -5,11 +5,12 @@ A Pipeline is a collection of tasks where dependencies are inferred
 from the datasets that tasks consume and produce.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass
 
 from glacier.core.task import Task
 from glacier.core.dataset import Dataset
+from glacier.compute.resources import ComputeResource
 
 
 @dataclass
@@ -30,10 +31,21 @@ class Pipeline:
     2. Finding which tasks consume each dataset (inputs)
     3. Connecting producers to consumers
 
-    Example:
+    Example (new pattern - recommended):
+        pipeline = Pipeline(name="etl")
+
         raw = Dataset("raw")
         clean = Dataset("clean")
 
+        @pipeline.task(compute=compute.local())
+        def extract() -> raw:
+            return fetch_data()
+
+        @pipeline.task(compute=compute.serverless())
+        def transform(data: raw) -> clean:
+            return process(data)
+
+    Example (old pattern - still supported):
         @task
         def extract() -> raw:
             return fetch_data()
@@ -42,26 +54,89 @@ class Pipeline:
         def transform(data: raw) -> clean:
             return process(data)
 
-        # Pipeline infers: extract -> raw -> transform
-        pipeline = Pipeline([extract, transform])
+        pipeline = Pipeline([extract, transform], name="etl")
     """
 
-    def __init__(self, tasks: List[Task], name: str = "pipeline"):
+    def __init__(self, tasks: Optional[List[Task]] = None, name: str = "pipeline"):
         """
-        Create a pipeline from a list of tasks.
+        Create a pipeline.
 
         Args:
-            tasks: List of Task objects
+            tasks: Optional list of Task objects (for backwards compatibility)
             name: Pipeline name
 
         The DAG is automatically built from task signatures.
         """
         self.name = name
-        self.tasks = tasks
+        self._tasks: List[Task] = tasks or []
         self.edges: List[PipelineEdge] = []
         self._dataset_producers: Dict[Dataset, Task] = {}
+        self._dag_built = False
 
-        self._build_dag()
+        if tasks:
+            # Old pattern - tasks provided upfront
+            self._build_dag()
+            self._dag_built = True
+
+    def task(
+        self,
+        compute: Optional[ComputeResource] = None,
+        retries: int = 0,
+        timeout: Optional[int] = None,
+        **kwargs
+    ) -> Callable:
+        """
+        Decorator to register a task with this pipeline.
+
+        This is the recommended way to add tasks to a pipeline.
+
+        Args:
+            compute: Compute resource for execution
+            retries: Number of retry attempts
+            timeout: Task timeout in seconds
+            **kwargs: Additional task configuration
+
+        Returns:
+            Decorator function
+
+        Example:
+            pipeline = Pipeline(name="etl")
+
+            @pipeline.task(compute=compute.serverless(memory=1024))
+            def my_task(data: input_data) -> output_data:
+                return process(data)
+        """
+        def decorator(func: Callable) -> Task:
+            # Import here to avoid circular dependency
+            from glacier.core.task import task as create_task
+
+            # Create task from function
+            task_obj = create_task(
+                compute=compute,
+                retries=retries,
+                timeout=timeout,
+                **kwargs
+            )(func)
+
+            # Register with pipeline
+            self._tasks.append(task_obj)
+            self._dag_built = False  # Invalidate DAG
+
+            return task_obj
+
+        return decorator
+
+    @property
+    def tasks(self) -> List[Task]:
+        """
+        Get all tasks in the pipeline.
+
+        Triggers DAG building if needed.
+        """
+        if not self._dag_built:
+            self._build_dag()
+            self._dag_built = True
+        return self._tasks.copy()
 
     def _build_dag(self):
         """
@@ -72,8 +147,12 @@ class Pipeline:
         2. Find tasks that consume it (from inputs)
         3. Create edges: producer -> consumer
         """
+        # Reset edges and producers
+        self.edges = []
+        self._dataset_producers = {}
+
         # First pass: map datasets to their producers
-        for task in self.tasks:
+        for task in self._tasks:
             for output_dataset in task.outputs:
                 if output_dataset in self._dataset_producers:
                     raise ValueError(
@@ -83,7 +162,7 @@ class Pipeline:
                 self._dataset_producers[output_dataset] = task
 
         # Second pass: create edges from producers to consumers
-        for task in self.tasks:
+        for task in self._tasks:
             for input_param in task.inputs:
                 dataset = input_param.dataset
                 producer = self._dataset_producers.get(dataset)
@@ -117,12 +196,17 @@ class Pipeline:
         Raises:
             ValueError if invalid
         """
+        # Build DAG if needed
+        if not self._dag_built:
+            self._build_dag()
+            self._dag_built = True
+
         # Check for cycles using DFS
         if self._has_cycle():
             raise ValueError("Pipeline contains a cycle!")
 
         # Check that all non-source tasks have their inputs satisfied
-        for task in self.tasks:
+        for task in self._tasks:
             for input_param in task.inputs:
                 dataset = input_param.dataset
                 if dataset not in self._dataset_producers:
@@ -135,12 +219,12 @@ class Pipeline:
     def _has_cycle(self) -> bool:
         """Check if the DAG has a cycle using DFS"""
         # Build adjacency list
-        adj = {task: [] for task in self.tasks}
+        adj = {task: [] for task in self._tasks}
         for edge in self.edges:
             adj[edge.from_task].append(edge.to_task)
 
         # Track visit states: 0 = unvisited, 1 = visiting, 2 = visited
-        state = {task: 0 for task in self.tasks}
+        state = {task: 0 for task in self._tasks}
 
         def dfs(task: Task) -> bool:
             if state[task] == 1:  # Currently visiting - cycle detected
@@ -157,7 +241,7 @@ class Pipeline:
             return False
 
         # Check all components
-        for task in self.tasks:
+        for task in self._tasks:
             if state[task] == 0:
                 if dfs(task):
                     return True
@@ -174,8 +258,11 @@ class Pipeline:
         Returns:
             List of source tasks
         """
+        if not self._dag_built:
+            self._build_dag()
+            self._dag_built = True
         tasks_with_deps = {edge.to_task for edge in self.edges}
-        return [task for task in self.tasks if task not in tasks_with_deps]
+        return [task for task in self._tasks if task not in tasks_with_deps]
 
     def get_sink_tasks(self) -> List[Task]:
         """
@@ -187,8 +274,11 @@ class Pipeline:
         Returns:
             List of sink tasks
         """
+        if not self._dag_built:
+            self._build_dag()
+            self._dag_built = True
         tasks_with_consumers = {edge.from_task for edge in self.edges}
-        return [task for task in self.tasks if task not in tasks_with_consumers]
+        return [task for task in self._tasks if task not in tasks_with_consumers]
 
     def get_execution_order(self) -> List[Task]:
         """
@@ -200,19 +290,23 @@ class Pipeline:
         Raises:
             ValueError if pipeline has a cycle
         """
+        if not self._dag_built:
+            self._build_dag()
+            self._dag_built = True
+
         if self._has_cycle():
             raise ValueError("Cannot get execution order: pipeline has a cycle")
 
         # Build adjacency list and in-degree count
-        adj = {task: [] for task in self.tasks}
-        in_degree = {task: 0 for task in self.tasks}
+        adj = {task: [] for task in self._tasks}
+        in_degree = {task: 0 for task in self._tasks}
 
         for edge in self.edges:
             adj[edge.from_task].append(edge.to_task)
             in_degree[edge.to_task] += 1
 
         # Kahn's algorithm for topological sort
-        queue = [task for task in self.tasks if in_degree[task] == 0]
+        queue = [task for task in self._tasks if in_degree[task] == 0]
         result = []
 
         while queue:
@@ -224,7 +318,7 @@ class Pipeline:
                 if in_degree[neighbor] == 0:
                     queue.append(neighbor)
 
-        if len(result) != len(self.tasks):
+        if len(result) != len(self._tasks):
             raise ValueError("Cycle detected in pipeline")
 
         return result
@@ -260,11 +354,15 @@ class Pipeline:
         Returns:
             String representation of the DAG
         """
+        if not self._dag_built:
+            self._build_dag()
+            self._dag_built = True
+
         lines = [f"Pipeline: {self.name}", "=" * 50, ""]
 
         # Show tasks
         lines.append("Tasks:")
-        for task in self.tasks:
+        for task in self._tasks:
             inputs = ", ".join(p.dataset.name for p in task.inputs)
             outputs = ", ".join(d.name for d in task.outputs)
             lines.append(f"  {task.name}")
@@ -284,5 +382,44 @@ class Pipeline:
 
         return "\n".join(lines)
 
+    def compile(self, compiler: 'Compiler') -> 'CompiledPipeline':
+        """
+        Compile pipeline using provided compiler.
+
+        Args:
+            compiler: Provider-specific compiler (injected dependency)
+
+        Returns:
+            Compiled infrastructure definition
+
+        Example:
+            from glacier_aws import AWSCompiler
+
+            compiler = AWSCompiler(region="us-east-1")
+            infra = pipeline.compile(compiler)
+            infra.export_pulumi("./infra")
+        """
+        self.validate()
+        return compiler.compile(self)
+
+    def run(self, executor: 'Executor') -> Any:
+        """
+        Execute pipeline with provided executor.
+
+        Args:
+            executor: Provider-specific executor (injected dependency)
+
+        Returns:
+            Execution result
+
+        Example:
+            from glacier_local import LocalExecutor
+
+            executor = LocalExecutor()
+            result = pipeline.run(executor)
+        """
+        self.validate()
+        return executor.execute(self)
+
     def __repr__(self):
-        return f"Pipeline({self.name}, tasks={len(self.tasks)}, edges={len(self.edges)})"
+        return f"Pipeline({self.name}, tasks={len(self._tasks)}, edges={len(self.edges)})"

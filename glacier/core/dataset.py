@@ -5,8 +5,11 @@ A Dataset is a named data artifact that flows through the pipeline.
 It can be used in function signatures to declare inputs and outputs.
 """
 
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, TYPE_CHECKING
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    from glacier.storage.resources import StorageResource
 
 
 class Dataset:
@@ -40,9 +43,21 @@ class Dataset:
 
         Args:
             name: Unique identifier for this dataset
-            storage: Where this dataset is stored (S3, local, database, etc.)
+            storage: Where this dataset is stored (ObjectStorage, Database, etc.)
             schema: Schema definition for validation
             metadata: Additional metadata (partitioning, format, etc.)
+
+        Example:
+            from glacier import Dataset
+            from glacier.storage import ObjectStorage
+
+            raw_data = Dataset(
+                "raw_data",
+                storage=ObjectStorage(
+                    access_pattern="frequent",
+                    versioning=True
+                )
+            )
         """
         self.name = name
         self.storage = storage

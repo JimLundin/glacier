@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "glacier-aws"
+version = "0.1.0"
+description = "AWS provider for Glacier data pipelines"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "Glacier Team" }
+]
+dependencies = [
+    "glacier-pipeline",
+    "pulumi>=3.0.0",
+    "pulumi-aws>=6.0.0",
+    "boto3>=1.28.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["glacier_aws"]
