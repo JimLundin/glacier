@@ -10,7 +10,7 @@ proper observability and security practices.
 
 import pandas as pd
 from glacier import Pipeline, Dataset, Environment
-from glacier.scheduling import cron, on_event, manual
+from glacier.scheduling import cron, on_update, manual
 from glacier.monitoring import monitoring, notify_email, notify_slack
 from glacier.secrets import secret
 
@@ -51,6 +51,7 @@ pipeline = Pipeline(name="production_etl")
 
 # Define datasets
 raw_data = Dataset(name="raw_data")
+api_data = Dataset(name="api_data")
 validated_data = Dataset(name="validated_data")
 enriched_data = Dataset(name="enriched_data")
 final_output = Dataset(name="final_output")
@@ -83,26 +84,28 @@ print('  Schedule: cron("0 2 * * *")')
 print()
 
 
-@pipeline.task(schedule=on_event(source="data-bucket", filter_pattern="*.csv"))
-def process_uploaded_file(file_path: str) -> raw_data:
+@pipeline.task(schedule=on_update(raw_data, filter_pattern="*.csv"))
+def process_uploaded_file(data: raw_data) -> api_data:
     """
-    Process files as they are uploaded to storage.
-    Triggered when CSV files are uploaded to data-bucket.
+    Process files when raw_data dataset is updated.
+    Triggered when CSV files are uploaded to raw_data storage.
+    Demonstrates selective triggering - only triggers on raw_data updates.
     """
-    print(f"Processing uploaded file: {file_path}")
-    return pd.read_csv(file_path)
+    print(f"Processing updated raw_data...")
+    # In real pipeline, data would be the updated dataset
+    return data * 1.5
 
 
-print("✓ process_uploaded_file: Event-triggered")
-print('  Trigger: on_event(source="data-bucket", filter_pattern="*.csv")')
+print("✓ process_uploaded_file: Event-triggered on raw_data updates")
+print('  Trigger: on_update(raw_data, filter_pattern="*.csv")')
 print()
 
 
 @pipeline.task()  # Manual trigger by default
-def validate(data: raw_data) -> validated_data:
+def validate(data: api_data) -> validated_data:
     """
     Validate data quality.
-    Manual trigger - runs as part of DAG.
+    Manual trigger - runs as part of DAG when dependencies satisfied.
     """
     print("Validating data...")
     # Data quality checks
@@ -142,6 +145,35 @@ def transform(data: enriched_data) -> final_output:
 
 
 print("✓ transform: Manual (runs as part of DAG)")
+print()
+
+# ============================================================================
+# Additional Scheduling Patterns (for reference)
+# ============================================================================
+print("=" * 70)
+print("EVENT TRIGGER PATTERNS")
+print("=" * 70)
+print()
+
+print("Example scheduling patterns:")
+print()
+print("# Pattern 1: Trigger on specific dataset")
+print("@pipeline.task(schedule=on_update(raw_data))")
+print("def process(data: raw_data, ref: reference_data) -> output:")
+print("    # Triggers ONLY when raw_data updates")
+print("    # Changes to reference_data do NOT trigger this task")
+print()
+print("# Pattern 2: Trigger on multiple datasets")
+print("@pipeline.task(schedule=on_update([raw_data, api_data]))")
+print("def merge(data1: raw_data, data2: api_data, static: static_data) -> output:")
+print("    # Triggers when EITHER raw_data OR api_data updates")
+print("    # Changes to static_data do NOT trigger this task")
+print()
+print("# Pattern 3: Trigger on ANY input dataset (default)")
+print("@pipeline.task(schedule=on_update())")
+print("def process_any(data1: raw_data, data2: api_data) -> output:")
+print("    # Triggers when ANY input dataset updates")
+print("    # Equivalent to on_update([raw_data, api_data])")
 print()
 
 # ============================================================================
@@ -249,7 +281,11 @@ print("   ✓ Reference in tasks and storage configs")
 print()
 print("2. SCHEDULING")
 print("   ✓ Cron-based: cron('0 2 * * *')")
-print("   ✓ Event-based: on_event(source=..., filter=...)")
+print("   ✓ Event-based: on_update(dataset, filter=...)")
+print("   ✓ Dataset-centric triggers:")
+print("     - on_update(raw_data) = trigger on specific dataset")
+print("     - on_update([ds1, ds2]) = trigger on multiple datasets")
+print("     - on_update() = trigger on ANY input dataset")
 print("   ✓ Manual: default for DAG tasks")
 print()
 print("3. MONITORING")

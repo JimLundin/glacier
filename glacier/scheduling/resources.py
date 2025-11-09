@@ -6,8 +6,43 @@ to a specific provider implementation.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Literal
-from dataclasses import dataclass
+from typing import Any, Literal, Annotated, get_origin, get_args
+from dataclasses import dataclass, field
+
+# Import Dataset at runtime for trigger_datasets
+# No circular dependency: scheduling -> dataset is one-way
+from glacier.core.dataset import Dataset
+
+
+def _extract_dataset_from_annotation(annotation: Any) -> Dataset | None:
+    """
+    Extract a Dataset instance from an Annotated type annotation.
+
+    Expects: Annotated[Dataset, instance]
+
+    Args:
+        annotation: The type annotation or Dataset instance to inspect
+
+    Returns:
+        Dataset instance if found, None otherwise
+    """
+    # If it's already a Dataset instance, return it directly
+    if isinstance(annotation, Dataset):
+        return annotation
+
+    # Check if this is an Annotated type
+    if get_origin(annotation) is Annotated:
+        # Extract metadata from Annotated
+        args = get_args(annotation)
+        # args[0] is the actual type (Dataset class)
+        # args[1:] is the metadata tuple (should contain the instance)
+        if len(args) > 1:
+            # Search metadata for Dataset instances
+            for metadata_item in args[1:]:
+                if isinstance(metadata_item, Dataset):
+                    return metadata_item
+
+    return None
 
 
 class ScheduleResource(ABC):
@@ -115,21 +150,18 @@ class EventTrigger(ScheduleResource):
     - Azure Event Grid
     - File watchers locally
 
-    Triggers tasks when events occur (file uploads, queue messages, etc.)
+    Triggers tasks when specific Dataset(s) are updated.
+    If no datasets specified, triggers on ANY input dataset update.
     """
 
-    event_source: str
-    """Source of events (storage bucket, queue, topic, etc.)"""
+    trigger_datasets: list[Dataset] = field(default_factory=list)
+    """
+    Dataset(s) that trigger this task when updated.
+    Empty list = trigger on ANY input dataset update (default behavior).
+    """
 
-    event_type: Literal[
-        "object_created",
-        "object_deleted",
-        "queue_message",
-        "topic_message",
-        "webhook",
-        "custom",
-    ] = "object_created"
-    """Type of event to trigger on"""
+    event_type: Literal["created", "modified", "deleted"] = "created"
+    """Type of change to trigger on"""
 
     filter_pattern: str | None = None
     """Optional filter pattern (e.g., '*.csv' for files)"""
@@ -148,9 +180,11 @@ class EventTrigger(ScheduleResource):
         return provider in ["aws", "gcp", "azure", "local"]
 
     def to_dict(self) -> dict[str, Any]:
+        # Serialize datasets by name for infrastructure generation
+        dataset_names = [ds.name for ds in self.trigger_datasets]
         return {
             "type": "event",
-            "event_source": self.event_source,
+            "trigger_datasets": dataset_names,
             "event_type": self.event_type,
             "filter_pattern": self.filter_pattern,
             "enabled": self.enabled,
@@ -158,8 +192,12 @@ class EventTrigger(ScheduleResource):
         }
 
     def __repr__(self):
-        filter_str = f", filter={self.filter_pattern}" if self.filter_pattern else ""
-        return f"EventTrigger({self.event_type} from {self.event_source}{filter_str})"
+        if self.trigger_datasets:
+            datasets_str = ", ".join(ds.name for ds in self.trigger_datasets)
+            filter_str = f", filter={self.filter_pattern}" if self.filter_pattern else ""
+            return f"EventTrigger(on={datasets_str}{filter_str})"
+        else:
+            return "EventTrigger(on=any input)"
 
 
 @dataclass
@@ -239,27 +277,20 @@ def cron(
     )
 
 
-def on_event(
-    source: str,
-    event_type: Literal[
-        "object_created",
-        "object_deleted",
-        "queue_message",
-        "topic_message",
-        "webhook",
-        "custom",
-    ] = "object_created",
+def on_update(
+    datasets: Dataset | list[Dataset] | None = None,
+    event_type: Literal["created", "modified", "deleted"] = "created",
     filter_pattern: str | None = None,
     enabled: bool = True,
     description: str | None = None,
 ) -> EventTrigger:
     """
-    Create an event-based trigger.
+    Create an event-based trigger on Dataset updates.
 
     Args:
-        source: Event source (bucket name, queue name, topic name, etc.)
-        event_type: Type of event to trigger on
-        filter_pattern: Optional filter pattern (e.g., '*.csv')
+        datasets: Dataset(s) to watch for updates. None or empty = trigger on ANY input dataset
+        event_type: Type of change to trigger on (created, modified, deleted)
+        filter_pattern: Optional filter pattern (e.g., '*.csv' for files)
         enabled: Whether the trigger is active
         description: Optional description
 
@@ -267,25 +298,45 @@ def on_event(
         EventTrigger resource
 
     Example:
-        # Trigger when CSV files are uploaded
-        @pipeline.task(schedule=on_event(
-            source="raw-data-bucket",
-            event_type="object_created",
-            filter_pattern="*.csv"
-        ))
-        def process_new_file(file_path: str) -> processed:
+        # Trigger when specific dataset updates
+        raw_data = Dataset(name="raw_data", storage=...)
+        reference_data = Dataset(name="reference_data", storage=...)
+
+        @pipeline.task(schedule=on_update(raw_data, filter_pattern="*.csv"))
+        def process(data: raw_data, ref: reference_data) -> output:
+            # Triggers when raw_data updates, not when reference_data updates
             ...
 
-        # Trigger on queue messages
-        @pipeline.task(schedule=on_event(
-            source="work-queue",
-            event_type="queue_message"
-        ))
-        def handle_message(message: dict) -> result:
+        # Trigger on multiple datasets
+        @pipeline.task(schedule=on_update([raw_data, api_data]))
+        def merge(data1: raw_data, data2: api_data, data3: static_data) -> output:
+            # Triggers when EITHER raw_data OR api_data updates
+            # static_data changes don't trigger this
+            ...
+
+        # Trigger on ANY input dataset update (default)
+        @pipeline.task(schedule=on_update())
+        def process_any(data1: raw_data, data2: api_data) -> output:
+            # Triggers when ANY input dataset updates
             ...
     """
+    # Normalize to list and extract Dataset instances from Annotated types
+    if datasets is None:
+        dataset_list = []
+    elif isinstance(datasets, list):
+        dataset_list = datasets
+    else:
+        dataset_list = [datasets]
+
+    # Extract actual Dataset instances from Annotated types
+    extracted_datasets = []
+    for ds in dataset_list:
+        extracted = _extract_dataset_from_annotation(ds)
+        if extracted is not None:
+            extracted_datasets.append(extracted)
+
     return EventTrigger(
-        event_source=source,
+        trigger_datasets=extracted_datasets,
         event_type=event_type,
         filter_pattern=filter_pattern,
         enabled=enabled,

@@ -10,7 +10,7 @@ from glacier.scheduling.resources import (
     EventTrigger,
     ManualTrigger,
     cron,
-    on_event,
+    on_update,
     manual,
 )
 
@@ -20,6 +20,6 @@ __all__ = [
     "EventTrigger",
     "ManualTrigger",
     "cron",
-    "on_event",
+    "on_update",
     "manual",
 ]
