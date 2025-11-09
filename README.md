@@ -1,278 +1,202 @@
 # Glacier 🏔️
 
-**Infrastructure-from-code data pipeline library**
+**Code-centric data pipeline framework with progressive disclosure**
 
-Define data pipelines using pure Python with type hints. The infrastructure emerges from your code.
+Build data pipelines in Python with three layers of explicitness - start simple, add complexity only when needed.
 
 **⚠️ ALPHA SOFTWARE** - API may change. No backwards compatibility guarantees until v1.0.
 
 ---
 
-## Philosophy
+## Quick Example
 
-**Type-Driven Pipeline Definition** - Declare your datasets and annotate your functions with what data they consume and produce. The DAG builds itself from your type hints. No manual wiring, no magic strings, no boilerplate.
+```python
+from glacier import Pipeline, Dataset
 
-**Infrastructure from Code** - Your pipeline definition IS your infrastructure definition. Datasets carry storage configuration, tasks carry compute configuration. Generate Terraform, Kubernetes manifests, or run locally from the same code.
+pipeline = Pipeline(name="etl")
 
-**Provider-Agnostic Core** - The core API has zero cloud dependencies. Choose your provider (AWS, GCP, Azure, local) at compile/execution time, not in your pipeline code.
+raw = Dataset(name="raw")
+clean = Dataset(name="clean")
+
+@pipeline.task()
+def extract() -> raw:
+    return fetch_data()
+
+@pipeline.task()
+def transform(data: raw) -> clean:
+    return process(data)
+
+# Run locally (no cloud needed)
+from glacier_local import LocalExecutor
+LocalExecutor().execute(pipeline)
+```
+
+That's it. **No configuration, no cloud dependencies, just Python.**
+
+---
+
+## The Three Layers
+
+Glacier has **three layers of explicitness** - use what you need as complexity grows:
+
+### Layer 1: Implicit (Simplest)
+Start here. No cloud configuration needed.
+
+```python
+from glacier import Pipeline, Dataset
+
+pipeline = Pipeline(name="etl")
+raw = Dataset(name="raw")
+clean = Dataset(name="clean")
+
+@pipeline.task()
+def extract() -> raw:
+    return fetch_data()
+
+@pipeline.task()
+def transform(data: raw) -> clean:
+    return process(data)
+
+# Run locally for development/testing
+from glacier_local import LocalExecutor
+LocalExecutor().execute(pipeline)
+```
+
+**Perfect for:** Single environment, prototyping, local development
+
+---
+
+### Layer 2: Environment (Provider-Agnostic)
+When you need multi-account/multi-region or want to organize by environment.
+
+```python
+from glacier import Pipeline, Dataset, Environment
+from glacier_aws import AWSProvider
+
+# Inject provider config
+env = Environment(
+    provider=AWSProvider(account="123456", region="us-east-1"),
+    name="prod"
+)
+
+# Generic methods work across any provider
+storage = env.object_storage(name="data")  # → S3 on AWS
+compute = env.serverless(name="func", handler="index.handler", code=...)
+
+data = Dataset(name="data", storage=storage)
+```
+
+**Switch to Azure? Just change the provider:**
+
+```python
+from glacier_azure import AzureProvider
+
+env = Environment(
+    provider=AzureProvider(subscription="xyz", region="eastus"),
+    name="prod"
+)
+
+# SAME CODE! Different cloud
+storage = env.object_storage(name="data")  # → Blob Storage on Azure
+```
+
+**Perfect for:** Multi-account, multi-region, switching clouds, organized tagging
+
+---
+
+### Layer 3: Raw Pulumi (Escape Hatch)
+When you need full control, use Pulumi directly.
+
+```python
+import pulumi_aws as aws
+
+# Use Pulumi features directly - no wrappers!
+bucket = aws.s3.BucketV2(
+    "my-data",
+    versioning=aws.s3.BucketVersioningArgs(enabled=True, mfa_delete=True),
+    lifecycle_rules=[...],
+    replication_configuration=[...]
+)
+
+# Use in pipeline like any other resource
+data = Dataset(name="data", storage=bucket)
+```
+
+**Perfect for:** Advanced Pulumi features, complex requirements, custom configurations
 
 ---
 
 ## Core Concepts
 
-A data pipeline is fundamentally: **input → logic → output**
+### Pipeline
+Container for tasks with auto-inferred DAG from type annotations.
 
-Glacier models this with three elements:
-
-### 1. Dataset - Named Data Artifacts
-
-```python
-from glacier import Dataset
-
-# Datasets are named data artifacts that flow through your pipeline
-raw_data = Dataset("raw_data")
-clean_data = Dataset("clean_data")
-metrics = Dataset("metrics")
-```
-
-Optionally attach storage and schema configuration:
+### Task
+Python function with `@pipeline.task()`. Dependencies inferred from type hints.
 
 ```python
-from glacier.storage import S3
+@pipeline.task()
+def extract() -> raw_data:  # Produces raw_data
+    return fetch()
 
-raw_data = Dataset(
-    name="raw_data",
-    storage=S3(bucket="my-bucket", prefix="raw/"),
-    schema=RawSchema
-)
-```
-
-### 2. Task - Functions with Type Hints
-
-```python
-from glacier import task, compute
-
-@task(compute=compute.local())
-def extract() -> raw_data:
-    """Type hint declares this produces raw_data"""
-    return fetch_from_api()
-
-@task(compute=compute.serverless(memory=1024))
-def transform(data: raw_data) -> clean_data:
-    """Type hints declare: consumes raw_data, produces clean_data"""
+@pipeline.task()
+def transform(data: raw_data) -> clean_data:  # Consumes raw_data, produces clean_data
     return process(data)
 
-@task(compute=compute.container(image="analytics:latest", cpu=4))
-def analyze(data: clean_data) -> metrics:
-    """Heavy computation in containers"""
-    return calculate(data)
+# DAG automatically inferred: extract → transform
 ```
 
-**Type hints declare data dependencies. Decorators declare execution context.**
+### Dataset
+Data artifact that flows through the pipeline. Accepts:
+- Nothing (ephemeral)
+- Our generic configs: `ObjectStorage`, `Database`
+- Environment resources: `env.object_storage()`
+- Raw Pulumi resources: `aws.s3.BucketV2()`
 
-### 3. Pipeline - Automatic DAG Inference
+### Environment
+**Provider-agnostic** wrapper for multi-account/region deployments.
 
-```python
-from glacier import Pipeline
+Generic methods:
+- `object_storage(name)` → S3, Blob Storage, GCS
+- `serverless(name, handler, code)` → Lambda, Azure Functions, Cloud Run
+- `database(name, engine)` → RDS, Azure SQL, Cloud SQL
 
-# Just list your tasks - the DAG is inferred from type hints!
-pipeline = Pipeline(
-    tasks=[extract, transform, analyze],
-    name="analytics"
-)
+You inject the provider: `Environment(provider=AWSProvider(...))`
 
-# Glacier infers: extract() -> raw_data -> transform() -> clean_data -> analyze()
-```
-
-The pipeline automatically knows:
-- `extract` has no inputs (it's a source)
-- `transform` needs `raw_data` (produced by `extract`)
-- `analyze` needs `clean_data` (produced by `transform`)
-
-**No manual wiring. The DAG emerges from your type annotations.**
+**Key insight:** Switch clouds by changing provider config, not code.
 
 ---
 
-## Quick Start
+## Key Features
 
-### Simple Linear Pipeline
+**Type-Driven DAG** - Dependencies inferred from function signatures. No manual wiring.
 
-```python
-from glacier import Dataset, task, Pipeline, compute
+**Progressive Disclosure** - Start simple (Layer 1), add complexity as needed (Layer 2, 3).
 
-# 1. Declare your datasets
-raw_users = Dataset("raw_users")
-clean_users = Dataset("clean_users")
-metrics = Dataset("metrics")
+**Provider-Agnostic Layer 2** - Generic methods work across AWS, Azure, GCP. Switch by changing config.
 
-# 2. Define tasks - type hints declare data flow
-@task(compute=compute.local())
-def extract() -> raw_users:
-    return fetch_users_from_api()
+**Pulumi Escape Hatch** - Drop down to raw Pulumi anytime for full control.
 
-@task(compute=compute.local())
-def clean(users: raw_users) -> clean_users:
-    return [
-        {**user, "name": user["name"].upper()}
-        for user in users
-    ]
+**Zero Cloud Dependencies** - Core library has no cloud SDKs. Provider packages are optional.
 
-@task(compute=compute.serverless(memory=512))
-def compute_metrics(users: clean_users) -> metrics:
-    return {
-        "total": len(users),
-        "avg_age": sum(u["age"] for u in users) / len(users)
-    }
-
-# 3. Create pipeline - DAG inferred automatically
-pipeline = Pipeline(
-    tasks=[extract, clean, compute_metrics],
-    name="user-analytics"
-)
-
-# 4. Validate and visualize
-pipeline.validate()
-print(pipeline.visualize())
-
-# The inferred DAG:
-# extract() -> raw_users -> clean() -> clean_users -> compute_metrics()
-```
-
-### Complex DAG with Fan-In and Fan-Out
-
-```python
-from glacier import Dataset, task, Pipeline, compute
-
-# Datasets
-raw_users = Dataset("raw_users")
-raw_orders = Dataset("raw_orders")
-clean_users = Dataset("clean_users")
-clean_orders = Dataset("clean_orders")
-merged = Dataset("merged")
-summary = Dataset("summary")
-details = Dataset("details")
-
-# Source tasks (parallel)
-@task(compute=compute.serverless(memory=512))
-def extract_users() -> raw_users:
-    return fetch_users()
-
-@task(compute=compute.serverless(memory=512))
-def extract_orders() -> raw_orders:
-    return fetch_orders()
-
-# Transform tasks (parallel)
-@task(compute=compute.local())
-def clean_users(users: raw_users) -> clean_users:
-    return clean(users)
-
-@task(compute=compute.local())
-def clean_orders(orders: raw_orders) -> clean_orders:
-    return clean(orders)
-
-# Fan-in: Multiple inputs → one output
-@task(compute=compute.container(image="spark:latest", cpu=4, memory=8192))
-def merge(users: clean_users, orders: clean_orders) -> merged:
-    """Takes TWO inputs - DAG infers both dependencies automatically!"""
-    return join(users, orders)
-
-# Fan-out: One input → multiple outputs
-@task(compute=compute.local())
-def summarize(data: merged) -> summary:
-    return create_summary(data)
-
-@task(compute=compute.local())
-def detail_report(data: merged) -> details:
-    return create_details(data)
-
-# Pipeline infers this DAG:
-#
-# extract_users  -> clean_users  ──┐
-#                                   ├─> merge ──┬─> summarize
-# extract_orders -> clean_orders ──┘            └─> detail_report
-
-pipeline = Pipeline(
-    tasks=[
-        extract_users, extract_orders,
-        clean_users, clean_orders,
-        merge, summarize, detail_report
-    ],
-    name="complex-analytics"
-)
-```
-
-**No `connect()` calls. No manual edge definitions. The DAG is implicit in your type hints.**
+**Local Execution** - Test pipelines locally before deploying to cloud.
 
 ---
 
-## Provider-Agnostic Compute
+## Installation
 
-Compute resources are abstract. The actual provider is chosen at compile/execution time:
+```bash
+# Core library (no cloud dependencies)
+pip install glacier-pipeline
 
-```python
-from glacier import compute
+# Add AWS provider
+pip install glacier-pipeline[aws]
 
-# Local process (for development)
-@task(compute=compute.local(workers=4))
-def my_task(data: input_data) -> output_data:
-    return process(data)
+# Add local executor
+pip install glacier-pipeline[local]
 
-# Container (maps to Docker, Kubernetes, ECS, Cloud Run, etc.)
-@task(compute=compute.container(
-    image="python:3.11",
-    cpu=2.0,
-    memory=4096
-))
-def heavy_task(data: input_data) -> output_data:
-    return expensive_operation(data)
-
-# Serverless (maps to Lambda, Cloud Functions, Azure Functions, etc.)
-@task(compute=compute.serverless(
-    memory=1024,
-    timeout=300
-))
-def light_task(data: input_data) -> output_data:
-    return quick_operation(data)
-```
-
-The same task definitions work everywhere. Choose your target when you compile or execute:
-
-```python
-# Run locally
-pipeline.run(executor=LocalExecutor())
-
-# Generate AWS infrastructure
-pipeline.compile(target=AWSTarget()).to_terraform("./infra")
-
-# Generate Kubernetes manifests
-pipeline.compile(target=KubernetesTarget()).to_yaml("./k8s")
-```
-
----
-
-## Pipeline Operations
-
-```python
-# Create pipeline
-pipeline = Pipeline(tasks=[...], name="my-pipeline")
-
-# Validate structure (checks for cycles, missing producers, etc.)
-pipeline.validate()
-
-# Visualize the DAG
-print(pipeline.visualize())
-
-# Get topological execution order
-for task in pipeline.get_execution_order():
-    print(f"Execute: {task.name}")
-
-# Analyze structure
-sources = pipeline.get_source_tasks()  # Tasks with no dependencies
-sinks = pipeline.get_sink_tasks()      # Tasks with no consumers
-
-# Get task relationships
-deps = pipeline.get_dependencies(some_task)
-consumers = pipeline.get_consumers(some_task)
+# Add all providers
+pip install glacier-pipeline[all]
 ```
 
 ---
@@ -281,92 +205,69 @@ consumers = pipeline.get_consumers(some_task)
 
 See [examples/](./examples/) for complete working examples:
 
-- **simple_pipeline.py** - Basic linear ETL pipeline
-- **complex_dag.py** - Fan-in, fan-out, diamond patterns, multiple sources
+- **three_layers.py** - Demonstrates all three layers of explicitness
+- **provider_switching.py** - Shows switching between AWS/Azure/GCP
 
 Run them:
 
 ```bash
-python examples/simple_pipeline.py
-python examples/complex_dag.py
+python examples/three_layers.py
+python examples/provider_switching.py
 ```
-
----
-
-## What Makes Glacier Different
-
-**1. Type-Driven DAG Construction**
-- No manual `depends_on` or `connect()` calls
-- DAG emerges from function signatures
-- IDE autocomplete and type checking for datasets
-
-**2. Functions are Tasks**
-- No special task classes to learn
-- Just Python functions with decorators
-- Natural composition
-
-**3. Truly Provider-Agnostic**
-- Zero cloud dependencies in your pipeline code
-- Same code runs locally or in any cloud
-- Provider chosen at compile/execution time
-
-**4. Infrastructure from Code**
-- Datasets carry storage configuration
-- Tasks carry compute configuration
-- Generate Terraform/K8s from pipeline definitions
-
-**5. Handles Complex DAGs Naturally**
-- Fan-in: `def merge(a: dataset_a, b: dataset_b) -> merged`
-- Fan-out: Multiple tasks depend on same dataset
-- Diamonds: Any arbitrary DAG structure
 
 ---
 
 ## Architecture
 
-For detailed design documentation, see [NEW_DESIGN.md](./NEW_DESIGN.md)
+For detailed design documentation, see [ARCHITECTURE.md](./ARCHITECTURE.md)
 
 Key components:
 
-- `glacier/core/dataset.py` - Dataset abstraction
-- `glacier/core/task.py` - Task decorator and signature inspection
-- `glacier/core/pipeline.py` - Pipeline with DAG inference
-- `glacier/compute/` - Provider-agnostic compute resources
+```
+glacier/
+├── core/
+│   ├── pipeline.py      # Pipeline with auto DAG inference
+│   ├── task.py          # @task decorator
+│   ├── dataset.py       # Data artifacts
+│   └── environment.py   # Provider-agnostic Environment + Provider interface
+├── storage/             # Generic storage configs (Layer 1)
+└── compute/             # Generic compute configs (Layer 1)
+
+providers/
+├── glacier-aws/         # AWS provider implementation
+├── glacier-local/       # Local execution
+└── glacier-azure/       # (future) Azure provider
+```
 
 ---
 
-## Installation
+## Design Principles
 
-```bash
-# Clone the repository
-git clone https://github.com/JimLundin/glacier.git
-cd glacier
-
-# Install in development mode
-pip install -e .
-```
+1. **Progressive disclosure** - Start simple, add complexity as needed
+2. **Dependency injection** - Provider config injected into Environment
+3. **Provider-agnostic Layer 2** - Switch clouds by changing config, not code
+4. **Pulumi, not abstraction** - We wrap Pulumi for convenience, not replace it
+5. **Always an escape hatch** - Can drop down to raw Pulumi anytime
+6. **Type-driven** - DAG inferred from function signatures
 
 ---
 
 ## Current Status
 
 **Implemented:**
-- ✅ Dataset abstraction with storage/schema support
-- ✅ Task decorator with type hint inspection
-- ✅ Automatic DAG inference from signatures
-- ✅ Complex DAG support (fan-in, fan-out, diamonds)
-- ✅ Cycle detection and validation
-- ✅ Topological sorting
-- ✅ Provider-agnostic compute resources
+- ✅ Three-layer architecture (Implicit, Environment, Raw Pulumi)
+- ✅ Provider-agnostic Environment with dependency injection
+- ✅ Auto DAG inference from type hints
+- ✅ Local execution
+- ✅ AWS provider implementation
+- ✅ Generic storage/compute abstractions
 
 **Coming Soon:**
-- 🚧 Local execution engine
-- 🚧 Distributed execution
-- 🚧 Infrastructure compilation (Terraform, K8s)
-- 🚧 Storage resource implementations
-- 🚧 Provider adapters (AWS, GCP, Azure)
+- 🚧 Azure provider
+- 🚧 GCP provider
 - 🚧 Schema validation
 - 🚧 Data lineage tracking
+- 🚧 Execution on deployed infrastructure
 
 ---
 
