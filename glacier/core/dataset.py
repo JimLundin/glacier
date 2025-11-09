@@ -7,7 +7,7 @@ It can be used in function signatures to declare inputs and outputs.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Annotated
 from dataclasses import dataclass
 
 
@@ -30,8 +30,8 @@ class Dataset:
             return process(input)
     """
 
-    def __init__(
-        self,
+    def __new__(
+        cls,
         name: str,
         storage: Any | None = None,
         schema: Any | None = None,
@@ -40,43 +40,35 @@ class Dataset:
         """
         Create a new Dataset.
 
+        Returns Annotated[Dataset, instance] so it can be used directly in type hints.
+
         Args:
             name: Unique identifier for this dataset
             storage: Where this dataset is stored - can be our StorageResource OR a Pulumi resource
             schema: Schema definition for validation
             metadata: Additional metadata (partitioning, format, etc.)
 
-        Example - Option 1 (our config):
+        Example:
             from glacier import Dataset
-            from glacier.storage import ObjectStorage
 
-            raw_data = Dataset(
-                "raw_data",
-                storage=ObjectStorage(
-                    access_pattern="frequent",
-                    versioning=True
-                )
-            )
+            raw_data = Dataset("raw_data")  # Returns Annotated[Dataset, instance]
 
-        Example - Option 2 (Pulumi resource):
-            import pulumi_aws as aws
-
-            raw_data = Dataset(
-                "raw_data",
-                storage=aws.s3.Bucket(
-                    "my-bucket",
-                    versioning=aws.s3.BucketVersioningArgs(enabled=True)
-                )
-            )
+            @task
+            def process(input: raw_data) -> raw_data:  # Works with type checkers!
+                return input
         """
-        self.name = name
-        self.storage = storage  # Can be our StorageResource or a Pulumi resource
-        self.schema = schema
-        self.metadata = metadata or {}
+        instance = super().__new__(cls)
+        instance.name = name
+        instance.storage = storage
+        instance.schema = schema
+        instance.metadata = metadata or {}
 
         # Runtime state (populated during execution)
-        self._value = None
-        self._materialized = False
+        instance._value = None
+        instance._materialized = False
+
+        # Return Annotated so this can be used as a type hint
+        return Annotated[Dataset, instance]
 
     def __repr__(self):
         storage_info = f", storage={self.storage}" if self.storage else ""
@@ -125,24 +117,6 @@ class Dataset:
         # Schema validation logic will be implemented based on schema type
         # For now, just return True
         return True
-
-    def __mro_entries__(self, bases: tuple) -> tuple:
-        """
-        PEP 560: Called when this instance is used as a base class or type annotation.
-
-        This method allows Dataset instances to be used in type annotations
-        without causing runtime errors. Type checkers will use the .pyi stub
-        file to understand these annotations.
-
-        Args:
-            bases: The bases tuple from a class definition
-
-        Returns:
-            Tuple containing the Dataset class itself
-        """
-        # Return the class, not the instance
-        # This allows: def func(x: dataset_instance) -> dataset_instance
-        return (Dataset,)
 
 
 @dataclass

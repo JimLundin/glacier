@@ -44,11 +44,9 @@ class Task:
 
     def _extract_dataset_from_annotation(self, annotation: Any) -> Dataset | None:
         """
-        Extract a Dataset instance from a type annotation.
+        Extract a Dataset instance from an Annotated type annotation.
 
-        Supports two patterns:
-        1. Direct: annotation is a Dataset instance (legacy pattern)
-        2. Annotated: Annotated[Type, dataset] where dataset is in metadata
+        Expects: Annotated[Dataset, instance]
 
         Args:
             annotation: The type annotation to inspect
@@ -56,16 +54,12 @@ class Task:
         Returns:
             Dataset instance if found, None otherwise
         """
-        # Pattern 1: Direct Dataset instance (legacy, still supported)
-        if isinstance(annotation, Dataset):
-            return annotation
-
-        # Pattern 2: Annotated[Type, metadata, ...]
         # Check if this is an Annotated type
         if get_origin(annotation) is Annotated:
             # Extract metadata from Annotated
             args = get_args(annotation)
-            # args[0] is the actual type, args[1:] is the metadata tuple
+            # args[0] is the actual type (Dataset class)
+            # args[1:] is the metadata tuple (should contain the instance)
             if len(args) > 1:
                 # Search metadata for Dataset instances
                 for metadata_item in args[1:]:
@@ -78,11 +72,8 @@ class Task:
         """
         Extract input and output datasets from function signature.
 
-        Supports two annotation patterns:
-        1. Direct: def func(x: dataset) -> dataset
-        2. Annotated: def func(x: Annotated[Any, dataset]) -> Annotated[Any, dataset]
-
-        The Annotated pattern is recommended for type checker compatibility.
+        Expects Annotated pattern: def func(x: raw) -> clean
+        where raw and clean are created via Dataset("name") which returns Annotated[Dataset, instance]
         """
         self.inputs: list[DatasetParameter] = []
         self.outputs: list[Dataset] = []
@@ -178,9 +169,8 @@ def task(fn: Callable | None = None, **config) -> Task:
     """
     Decorator to mark a function as a pipeline task.
 
-    The function signature declares data dependencies:
-    - Parameters typed with Dataset instances are inputs
-    - Return type with Dataset instance(s) are outputs
+    Dataset instances created via Dataset("name") return Annotated[Dataset, instance],
+    allowing them to be used directly in type hints while remaining type-checker compatible.
 
     The decorator can specify execution configuration:
     - compute: Compute resource to use
@@ -189,12 +179,12 @@ def task(fn: Callable | None = None, **config) -> Task:
     - etc.
 
     Example:
-        raw_data = Dataset("raw_data")
-        clean_data = Dataset("clean_data")
+        raw = Dataset("raw")  # Returns Annotated[Dataset, instance]
+        clean = Dataset("clean")  # Returns Annotated[Dataset, instance]
 
         @task(compute=compute.local())
-        def clean(input: raw_data) -> clean_data:
-            return process(input)
+        def process(input: raw) -> clean:  # Type checker sees Dataset!
+            return transform(input)
 
     Args:
         fn: The function to decorate (when used without arguments)
