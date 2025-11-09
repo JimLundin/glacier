@@ -1,15 +1,14 @@
 """
 Glacier AWS Provider.
 
-Provides AWS-specific conveniences for Glacier pipelines.
-Main export is Environment - a convenience wrapper around Pulumi.
+Implements the Provider interface for AWS, creating Pulumi AWS resources.
 """
 
-from glacier_aws.environment import Environment
+from glacier_aws.provider import AWSProvider
 from glacier_aws.executor import AWSExecutor
 
 __all__ = [
-    "Environment",
+    "AWSProvider",
     "AWSExecutor",
 ]
 
