@@ -41,6 +41,10 @@ from glacier.core.task import task, Task
 from glacier.core.pipeline import Pipeline
 from glacier.core.environment import Environment, Provider
 import glacier.compute as compute
+import glacier.storage as storage
+import glacier.secrets as secrets
+import glacier.scheduling as scheduling
+import glacier.monitoring as monitoring
 
 __version__ = "0.2.0-alpha"
 __all__ = [
@@ -51,4 +55,8 @@ __all__ = [
     "Environment",
     "Provider",
     "compute",
+    "storage",
+    "secrets",
+    "scheduling",
+    "monitoring",
 ]

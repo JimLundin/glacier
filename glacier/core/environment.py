@@ -29,6 +29,10 @@ class Provider:
         """Create managed database (RDS, Azure SQL, Cloud SQL, etc.)"""
         raise NotImplementedError
 
+    def secret(self, name: str, secret_string: str | None = None, **kwargs) -> Any:
+        """Create secret storage (Secrets Manager, Key Vault, Secret Manager, etc.)"""
+        raise NotImplementedError
+
     def get_provider_name(self) -> str:
         """Return provider name (aws, azure, gcp)"""
         raise NotImplementedError
@@ -142,6 +146,41 @@ class Environment:
         """
         return self.provider.database(
             name=name, engine=engine, env_tags=self.tags, **kwargs
+        )
+
+    def secret(self, name: str, secret_string: str | None = None, **kwargs) -> Any:
+        """
+        Create secret storage (provider-agnostic).
+
+        Maps to:
+        - Secrets Manager on AWS
+        - Azure Key Vault on Azure
+        - Secret Manager on GCP
+        - Environment variables locally
+
+        Args:
+            name: Secret identifier
+            secret_string: Optional secret value to store
+            **kwargs: Provider-specific options
+
+        Returns:
+            Pulumi resource for the secret
+
+        Example:
+            # Create a secret
+            db_password = env.secret(
+                name="db_password",
+                secret_string="my-secure-password"
+            )
+
+            # Reference in dataset or task
+            db = Dataset(
+                name="database",
+                connection_secret=db_password
+            )
+        """
+        return self.provider.secret(
+            name=name, secret_string=secret_string, env_tags=self.tags, **kwargs
         )
 
     def __repr__(self):
