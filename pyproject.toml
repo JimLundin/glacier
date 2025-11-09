@@ -7,7 +7,7 @@ name = "glacier-pipeline"
 version = "0.1.0"
 description = "Code-centric data pipeline library with infrastructure-from-code generation"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.14"
 license = { text = "MIT" }
 authors = [
     { name = "Glacier Team" }
@@ -17,17 +17,9 @@ classifiers = [
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.14",
 ]
-dependencies = [
-    "polars>=0.19.0",
-    "pydantic>=2.0.0",
-    "click>=8.0.0",
-    "pyyaml>=6.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
 aws = [
@@ -74,11 +66,11 @@ packages = ["glacier"]
 
 [tool.black]
 line-length = 100
-target-version = ['py39']
+target-version = ['py314']
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = [
@@ -92,7 +84,7 @@ select = [
 ignore = []
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.14"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false

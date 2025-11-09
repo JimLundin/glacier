@@ -4,7 +4,7 @@ AWS Provider: Implements Glacier Provider interface for AWS.
 This creates actual Pulumi resources (pulumi_aws) with sensible defaults.
 """
 
-from typing import Any, Optional, Dict
+from typing import Any
 from glacier.core.environment import Provider
 
 
@@ -19,7 +19,7 @@ class AWSProvider(Provider):
         self,
         account: str,
         region: str = "us-east-1",
-        profile: Optional[str] = None,
+        profile: str | None = None,
     ):
         """
         Create AWS provider.
@@ -36,7 +36,7 @@ class AWSProvider(Provider):
     def get_provider_name(self) -> str:
         return "aws"
 
-    def object_storage(self, name: str, env_tags: Optional[Dict] = None, **kwargs) -> Any:
+    def object_storage(self, name: str, env_tags: dict | None = None, **kwargs) -> Any:
         """
         Create S3 bucket.
 
@@ -73,7 +73,7 @@ class AWSProvider(Provider):
         name: str,
         handler: str,
         code: Any,
-        env_tags: Optional[Dict] = None,
+        env_tags: dict | None = None,
         runtime: str = "python3.11",
         memory: int = 512,
         timeout: int = 300,
@@ -139,7 +139,7 @@ class AWSProvider(Provider):
         self,
         name: str,
         engine: str = "postgres",
-        env_tags: Optional[Dict] = None,
+        env_tags: dict | None = None,
         instance_class: str = "db.t3.micro",
         allocated_storage: int = 20,
         **kwargs

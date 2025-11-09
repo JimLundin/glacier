@@ -6,7 +6,7 @@ in different environments (local, AWS, GCP, Azure, etc.).
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from glacier.core.pipeline import Pipeline
@@ -43,7 +43,7 @@ class Executor(ABC):
         pass
 
     @abstractmethod
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self) -> dict[str, Any]:
         """
         Get execution status.
 

@@ -7,7 +7,7 @@ at compile/execution time.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any
 from dataclasses import dataclass
 
 
@@ -20,7 +20,7 @@ class ComputeResource(ABC):
     """
 
     @abstractmethod
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """
         Convert to dictionary representation for infrastructure generation.
 
@@ -54,7 +54,7 @@ class Local(ComputeResource):
     workers: int = 1
     """Number of parallel workers"""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "type": "local",
             "workers": self.workers,
@@ -92,10 +92,10 @@ class Container(ComputeResource):
     gpu: int = 0
     """Number of GPUs"""
 
-    env: Optional[Dict[str, str]] = None
+    env: dict[str, str] | None = None
     """Environment variables"""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "type": "container",
             "image": self.image,
@@ -130,13 +130,13 @@ class Serverless(ComputeResource):
     timeout: int = 300
     """Timeout in seconds"""
 
-    runtime: Optional[str] = None
+    runtime: str | None = None
     """Runtime version (e.g., 'python3.11')"""
 
-    env: Optional[Dict[str, str]] = None
+    env: dict[str, str] | None = None
     """Environment variables"""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "type": "serverless",
             "memory": self.memory,
@@ -171,7 +171,7 @@ def container(
     cpu: float = 1.0,
     memory: int = 512,
     gpu: int = 0,
-    env: Optional[Dict[str, str]] = None,
+    env: dict[str, str] | None = None,
 ) -> Container:
     """
     Create a container compute resource.
@@ -192,8 +192,8 @@ def container(
 def serverless(
     memory: int = 512,
     timeout: int = 300,
-    runtime: Optional[str] = None,
-    env: Optional[Dict[str, str]] = None,
+    runtime: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> Serverless:
     """
     Create a serverless compute resource.

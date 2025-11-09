@@ -5,7 +5,7 @@ A Pipeline is a collection of tasks where dependencies are inferred
 from the datasets that tasks consume and produce.
 """
 
-from typing import List, Dict, Any, Optional, Callable
+from typing import Any, Callable
 from dataclasses import dataclass
 
 from glacier.core.task import Task
@@ -57,7 +57,7 @@ class Pipeline:
         pipeline = Pipeline([extract, transform], name="etl")
     """
 
-    def __init__(self, tasks: Optional[List[Task]] = None, name: str = "pipeline"):
+    def __init__(self, tasks: list[Task] | None = None, name: str = "pipeline"):
         """
         Create a pipeline.
 
@@ -68,9 +68,9 @@ class Pipeline:
         The DAG is automatically built from task signatures.
         """
         self.name = name
-        self._tasks: List[Task] = tasks or []
-        self.edges: List[PipelineEdge] = []
-        self._dataset_producers: Dict[Dataset, Task] = {}
+        self._tasks: list[Task] = tasks or []
+        self.edges: list[PipelineEdge] = []
+        self._dataset_producers: dict[Dataset, Task] = {}
         self._dag_built = False
 
         if tasks:
@@ -80,9 +80,9 @@ class Pipeline:
 
     def task(
         self,
-        compute: Optional[ComputeResource] = None,
+        compute: ComputeResource | None = None,
         retries: int = 0,
-        timeout: Optional[int] = None,
+        timeout: int | None = None,
         **kwargs
     ) -> Callable:
         """
@@ -127,7 +127,7 @@ class Pipeline:
         return decorator
 
     @property
-    def tasks(self) -> List[Task]:
+    def tasks(self) -> list[Task]:
         """
         Get all tasks in the pipeline.
 
@@ -248,7 +248,7 @@ class Pipeline:
 
         return False
 
-    def get_source_tasks(self) -> List[Task]:
+    def get_source_tasks(self) -> list[Task]:
         """
         Get tasks that have no dependencies (source tasks).
 
@@ -264,7 +264,7 @@ class Pipeline:
         tasks_with_deps = {edge.to_task for edge in self.edges}
         return [task for task in self._tasks if task not in tasks_with_deps]
 
-    def get_sink_tasks(self) -> List[Task]:
+    def get_sink_tasks(self) -> list[Task]:
         """
         Get tasks that have no consumers (sink tasks).
 
@@ -280,7 +280,7 @@ class Pipeline:
         tasks_with_consumers = {edge.from_task for edge in self.edges}
         return [task for task in self._tasks if task not in tasks_with_consumers]
 
-    def get_execution_order(self) -> List[Task]:
+    def get_execution_order(self) -> list[Task]:
         """
         Get topological ordering of tasks for execution.
 
@@ -323,7 +323,7 @@ class Pipeline:
 
         return result
 
-    def get_dependencies(self, task: Task) -> List[Task]:
+    def get_dependencies(self, task: Task) -> list[Task]:
         """
         Get all tasks that this task depends on.
 
@@ -335,7 +335,7 @@ class Pipeline:
         """
         return [edge.from_task for edge in self.edges if edge.to_task == task]
 
-    def get_consumers(self, task: Task) -> List[Task]:
+    def get_consumers(self, task: Task) -> list[Task]:
         """
         Get all tasks that depend on this task.
 
