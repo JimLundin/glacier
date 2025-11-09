@@ -126,6 +126,24 @@ class Dataset:
         # For now, just return True
         return True
 
+    def __mro_entries__(self, bases: tuple) -> tuple:
+        """
+        PEP 560: Called when this instance is used as a base class or type annotation.
+
+        This method allows Dataset instances to be used in type annotations
+        without causing runtime errors. Type checkers will use the .pyi stub
+        file to understand these annotations.
+
+        Args:
+            bases: The bases tuple from a class definition
+
+        Returns:
+            Tuple containing the Dataset class itself
+        """
+        # Return the class, not the instance
+        # This allows: def func(x: dataset_instance) -> dataset_instance
+        return (Dataset,)
+
 
 @dataclass
 class DatasetReference:
