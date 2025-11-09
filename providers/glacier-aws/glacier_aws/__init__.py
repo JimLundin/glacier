@@ -1,21 +1,16 @@
 """
 Glacier AWS Provider.
 
-This package provides AWS-specific implementations for Glacier pipelines,
-including Pulumi-based infrastructure compilation and execution.
+Provides AWS-specific conveniences for Glacier pipelines.
+Main export is Environment - a convenience wrapper around Pulumi.
 """
 
-from glacier_aws.compiler import AWSCompiler
+from glacier_aws.environment import Environment
 from glacier_aws.executor import AWSExecutor
-from glacier_aws.environment import AWSEnvironment
-from glacier_aws import storage, compute
 
 __all__ = [
-    "AWSCompiler",
+    "Environment",
     "AWSExecutor",
-    "AWSEnvironment",
-    "storage",
-    "compute",
 ]
 
 __version__ = "0.1.0"

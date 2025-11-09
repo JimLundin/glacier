@@ -1,119 +1,178 @@
 # Glacier Architecture
 
-Glacier is a code-centric data pipeline framework that lets you define pipelines in Python and optionally generate infrastructure.
+Glacier is a code-centric data pipeline framework with **three layers of explicitness** - use what you need as complexity grows.
 
-## Core Concepts
+## The Three Layers
 
-### 1. Pipeline
-A pipeline is a collection of tasks with automatically inferred dependencies.
+### Layer 1: Implicit (Simplest)
+Everything automatic - perfect for single environment, simple deployments.
 
 ```python
-from glacier import Pipeline
+from glacier import Pipeline, Dataset
 
 pipeline = Pipeline(name="etl")
-```
 
-### 2. Tasks
-Tasks are Python functions that process data. Dependencies are inferred from type annotations.
+raw = Dataset(name="raw")
+clean = Dataset(name="clean")
 
-```python
 @pipeline.task()
-def extract() -> raw_data:
+def extract() -> raw:
     return fetch_data()
 
 @pipeline.task()
-def transform(data: raw_data) -> clean_data:
+def transform(data: raw) -> clean:
     return process(data)
+
+# Run locally
+from glacier_local import LocalExecutor
+LocalExecutor().execute(pipeline)
 ```
 
-The DAG is built automatically: `extract → transform` because `transform` consumes what `extract` produces.
+No configuration needed. Just define your pipeline and run it.
 
-### 3. Datasets
-Datasets represent data with optional storage configuration.
+---
+
+### Layer 2: Explicit Environments
+When you need multi-account/multi-region or want to organize by environment.
+
+Our `Environment` wrapper provides **convenience over Pulumi** - sensible defaults, less boilerplate.
 
 ```python
-from glacier import Dataset
+from glacier import Pipeline, Dataset
+from glacier_aws import Environment
 
-raw_data = Dataset(name="raw", storage=some_storage)
+# Define environments (wraps Pulumi with defaults)
+aws_prod = Environment(account="123456", region="us-east-1", name="prod")
+aws_dev = Environment(account="789012", region="us-west-2", name="dev")
+
+# Resources get environment tags automatically
+prod_bucket = aws_prod.s3(bucket="prod-data")  # Creates pulumi_aws.s3.BucketV2
+dev_bucket = aws_dev.s3(bucket="dev-data")
+
+# Use in pipeline
+prod_data = Dataset(name="data", storage=prod_bucket)
+
+@pipeline.task()
+def process() -> prod_data:
+    return transform(data)
 ```
 
-### 4. Resources (Storage & Compute)
+**What's happening:** `aws_prod.s3()` is just calling `pulumi_aws.s3.BucketV2()` with:
+- Automatic environment tags
+- Sensible defaults
+- Less boilerplate
 
-Resources can be specified in two ways:
+You're still using Pulumi - we're just making it easier.
 
-**Option 1: Use our simple abstractions**
+---
+
+### Layer 3: Raw Pulumi (Escape Hatch)
+When you need full control - drop down to Pulumi directly.
+
 ```python
-from glacier.storage import ObjectStorage
-from glacier.compute import Serverless
-
-storage = ObjectStorage(bucket="my-data", provider="aws")
-compute = Serverless(memory=512, timeout=300, provider="aws")
-```
-
-**Option 2: Use Pulumi resources directly**
-```python
+from glacier import Pipeline, Dataset
 import pulumi_aws as aws
 
-storage = aws.s3.Bucket("my-data",
-    versioning=aws.s3.BucketVersioningArgs(enabled=True),
-    lifecycle_rules=[...])
+# Use Pulumi directly for advanced features
+bucket = aws.s3.BucketV2(
+    "my-data",
+    bucket="my-data",
+    versioning=aws.s3.BucketVersioningArgs(
+        enabled=True,
+        mfa_delete=True
+    ),
+    lifecycle_rules=[
+        aws.s3.BucketLifecycleRuleArgs(
+            enabled=True,
+            transitions=[{
+                "days": 30,
+                "storage_class": "GLACIER"
+            }, {
+                "days": 90,
+                "storage_class": "DEEP_ARCHIVE"
+            }]
+        )
+    ],
+    replication_configuration=aws.s3.BucketReplicationConfigurationArgs(
+        role=replication_role.arn,
+        rules=[...]
+    )
+)
 
-compute = aws.lambda_.Function("my-function",
-    memory_size=512,
-    timeout=300)
+# Use in pipeline like any other resource
+data = Dataset(name="data", storage=bucket)
 ```
 
-Both work the same way - Glacier accepts either.
+**No wrappers, no abstractions** - just use Pulumi features directly.
 
-## Provider Agnosticism
+---
 
-The core library has zero cloud dependencies:
-- No imports of `boto3`, `google-cloud-storage`, `pulumi`, etc.
-- Provider-specific code lives in separate packages: `glacier-aws`, `glacier-gcp`, `glacier-local`
+## Core Concepts
 
-When you need provider-specific features, install the provider package:
-```bash
-pip install glacier-pipeline[aws]  # Adds pulumi-aws, boto3
-```
+### Pipeline
+Container for tasks with auto-inferred DAG from type annotations.
 
-## Execution
+### Task
+Python function decorated with `@pipeline.task()`. Dependencies inferred from parameters/return types.
 
-**Local (for testing):**
-```python
-from glacier_local import LocalExecutor
+### Dataset
+Data artifact with optional storage. Accepts:
+- Nothing (ephemeral)
+- Our `ObjectStorage`/`Database` configs (provider-agnostic)
+- `Environment.s3()` / `Environment.rds()` (Pulumi with defaults)
+- Raw Pulumi resources (full control)
 
-results = LocalExecutor().execute(pipeline)
-```
+### Environment (Optional)
+Convenience wrapper for organizing multi-account/region deployments. Creates Pulumi resources with sensible defaults.
 
-**Cloud (generates infrastructure):**
-```python
-from glacier_aws import AWSExecutor
+---
 
-executor = AWSExecutor(region="us-east-1")
-executor.deploy(pipeline)  # Generates and deploys Pulumi code
-```
+## Design Principles
 
-## Key Design Principles
+1. **Progressive disclosure**: Start simple, add complexity as needed
+2. **Pulumi, not abstraction**: We wrap Pulumi for convenience, not replace it
+3. **Always an escape hatch**: Can drop down to raw Pulumi anytime
+4. **Provider-agnostic core**: Base library has zero cloud dependencies
+5. **Type-driven**: DAG inferred from function signatures
 
-1. **Simple by default**: Use our abstractions for common cases
-2. **Powerful when needed**: Drop down to Pulumi for advanced features
-3. **Provider-agnostic core**: No cloud SDKs in the base library
-4. **Type-driven**: DAG inferred from function signatures
-5. **Optional infrastructure**: Can run locally without generating any cloud resources
+---
 
 ## Package Structure
 
 ```
 glacier/
-├── core/           # Pipeline, Task, Dataset (no cloud deps)
-├── storage/        # Generic storage abstractions
-├── compute/        # Generic compute abstractions
-└── execution/      # Execution interfaces
+├── core/          # Pipeline, Task, Dataset (no cloud deps)
+├── storage/       # Generic ObjectStorage, Database configs
+└── compute/       # Generic Serverless, Container configs
 
 providers/
-├── glacier-aws/    # AWS-specific (optional)
-├── glacier-gcp/    # GCP-specific (optional)
-└── glacier-local/  # Local execution (optional)
+├── glacier-aws/
+│   └── Environment    # Convenience wrapper over pulumi_aws
+├── glacier-gcp/       # (future)
+└── glacier-local/
+    └── LocalExecutor  # Run pipelines locally
 ```
 
-That's it. Keep it simple.
+---
+
+## When to Use Each Layer
+
+**Layer 1 (Implicit):**
+- Single AWS account
+- Simple deployments
+- Prototyping/testing
+- Local development
+
+**Layer 2 (Environment):**
+- Multi-account (dev/staging/prod)
+- Multi-region deployments
+- Want organized tagging
+- Want less Pulumi boilerplate
+
+**Layer 3 (Raw Pulumi):**
+- Need specific Pulumi features
+- Complex infrastructure requirements
+- Advanced networking/security
+- Custom resource configurations
+
+Start with Layer 1. Move to Layer 2 when you need environments. Use Layer 3 when you need specific features.
