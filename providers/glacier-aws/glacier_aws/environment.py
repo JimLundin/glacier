@@ -1,14 +1,8 @@
 """
-AWS Environment: Represents an AWS account/region context.
+AWS Environment: Convenience wrapper around Pulumi for common AWS patterns.
 
-An environment encapsulates:
-- AWS account ID and region
-- Credentials/authentication
-- Naming conventions and tags
-- Resource factory methods
-
-Resources are created FROM environments, ensuring they belong
-to the correct account/region context.
+This is NOT a new abstraction - it's just a thin wrapper that makes Pulumi
+easier to use for common cases. You can always drop down to raw Pulumi.
 """
 
 from typing import Optional, Dict, Any
@@ -16,235 +10,168 @@ from dataclasses import dataclass
 
 
 @dataclass
-class AWSEnvironment:
+class Environment:
     """
-    AWS environment context for resource creation.
+    AWS environment configuration for multi-account/multi-region deployments.
 
-    This represents a specific AWS account + region + credential context.
-    Resources created from this environment belong to this context.
+    This is a convenience wrapper that helps organize resources by environment.
+    It creates Pulumi resources with sensible defaults.
 
     Example:
-        # Production environment
-        aws_prod = AWSEnvironment(
-            account_id="123456789012",
-            region="us-east-1",
-            profile="production",
-            environment="prod",
-            tags={"Environment": "production", "Team": "data"}
-        )
+        # Define environments
+        aws_prod = Environment(account="123", region="us-east-1", name="prod")
+        aws_dev = Environment(account="456", region="us-west-2", name="dev")
 
-        # Development environment (different account!)
-        aws_dev = AWSEnvironment(
-            account_id="987654321098",
-            region="us-west-2",
-            profile="development",
-            environment="dev",
-            tags={"Environment": "development"}
-        )
-
-        # Resources belong to specific environment
-        prod_bucket = aws_prod.storage.s3(bucket="prod-data")
-        dev_bucket = aws_dev.storage.s3(bucket="dev-data")
-
-        @pipeline.task(compute=aws_prod.compute.lambda_(memory=1024))
-        def process(data: prod_bucket) -> output:
-            return transform(data)
+        # Create resources in specific environments
+        prod_bucket = aws_prod.s3(bucket="prod-data")
+        dev_bucket = aws_dev.s3(bucket="dev-data")
     """
 
-    account_id: str
+    account: str
     """AWS account ID"""
 
     region: str = "us-east-1"
     """AWS region"""
 
-    profile: Optional[str] = None
-    """AWS profile name for credentials"""
-
-    environment: str = "default"
+    name: str = "default"
     """Environment name (dev, staging, prod, etc.)"""
 
-    naming_prefix: str = ""
-    """Prefix for generated resource names"""
-
     tags: Optional[Dict[str, str]] = None
-    """Default tags for all resources in this environment"""
-
-    vpc_id: Optional[str] = None
-    """VPC ID for resources requiring VPC"""
-
-    subnet_ids: Optional[list] = None
-    """Subnet IDs for VPC resources"""
-
-    security_group_ids: Optional[list] = None
-    """Security group IDs for VPC resources"""
+    """Default tags for all resources"""
 
     def __post_init__(self):
-        """Initialize resource factories"""
-        self.tags = self.tags or {}
-        self.storage = AWSStorageFactory(self)
-        self.compute = AWSComputeFactory(self)
-        self.database = AWSDatabaseFactory(self)
+        """Initialize default tags"""
+        if self.tags is None:
+            self.tags = {}
+        if "Environment" not in self.tags:
+            self.tags["Environment"] = self.name
 
-    def __repr__(self):
-        return (
-            f"AWSEnvironment(account={self.account_id}, "
-            f"region={self.region}, env={self.environment})"
-        )
-
-
-class AWSStorageFactory:
-    """Factory for creating AWS storage resources in this environment"""
-
-    def __init__(self, environment: AWSEnvironment):
-        self.environment = environment
-
-    def s3(
-        self,
-        bucket: str,
-        prefix: str = "",
-        storage_class: str = "STANDARD",
-        versioning: bool = False,
-        encryption: Optional[str] = None,
-        kms_key_id: Optional[str] = None,
-        lifecycle_rules: Optional[list] = None,
-        **kwargs
-    ):
+    def s3(self, bucket: str, **kwargs) -> Any:
         """
-        Create an S3 bucket in this environment.
+        Create an S3 bucket with sensible defaults.
+
+        This wraps pulumi_aws.s3.BucketV2 with common defaults.
+        For advanced features, use pulumi_aws directly (escape hatch).
 
         Args:
             bucket: Bucket name
-            prefix: Key prefix
-            storage_class: S3 storage class
-            versioning: Enable versioning
-            encryption: Encryption type
-            kms_key_id: KMS key ARN
-            lifecycle_rules: Lifecycle rules
-            **kwargs: Additional S3-specific configuration
+            **kwargs: Additional arguments passed to pulumi_aws.s3.BucketV2
 
         Returns:
-            S3Resource bound to this environment
+            Pulumi S3 bucket resource
         """
-        from glacier_aws.resources.storage import S3Resource
+        try:
+            import pulumi_aws as aws
+        except ImportError:
+            raise ImportError(
+                "pulumi_aws not installed. Run: pip install glacier-pipeline[aws]"
+            )
 
-        return S3Resource(
-            environment=self.environment,
+        # Merge environment tags with any provided tags
+        resource_tags = {**self.tags, **kwargs.pop("tags", {})}
+
+        return aws.s3.BucketV2(
+            bucket,
             bucket=bucket,
-            prefix=prefix,
-            storage_class=storage_class,
-            versioning=versioning,
-            encryption=encryption,
-            kms_key_id=kms_key_id,
-            lifecycle_rules=lifecycle_rules or [],
+            tags=resource_tags,
             **kwargs
         )
-
-    def efs(self, file_system_name: str, **kwargs):
-        """Create an EFS file system in this environment"""
-        from glacier_aws.resources.storage import EFSResource
-
-        return EFSResource(
-            environment=self.environment,
-            file_system_name=file_system_name,
-            **kwargs
-        )
-
-
-class AWSComputeFactory:
-    """Factory for creating AWS compute resources in this environment"""
-
-    def __init__(self, environment: AWSEnvironment):
-        self.environment = environment
 
     def lambda_(
         self,
-        memory: int = 512,
-        timeout: int = 300,
+        name: str,
+        handler: str,
+        code: Any,
         runtime: str = "python3.11",
-        layers: Optional[list] = None,
-        reserved_concurrency: Optional[int] = None,
-        environment_vars: Optional[Dict[str, str]] = None,
         **kwargs
-    ):
+    ) -> Any:
         """
-        Create a Lambda function in this environment.
+        Create a Lambda function with sensible defaults.
+
+        This wraps pulumi_aws.lambda_.Function with common defaults.
 
         Args:
-            memory: Memory in MB (128-10240)
-            timeout: Timeout in seconds (1-900)
+            name: Function name
+            handler: Function handler (e.g., "index.handler")
+            code: Function code (Pulumi Archive or path)
             runtime: Lambda runtime
-            layers: Lambda layer ARNs
-            reserved_concurrency: Reserved concurrent executions
-            environment_vars: Environment variables
-            **kwargs: Additional Lambda configuration
+            **kwargs: Additional arguments passed to pulumi_aws.lambda_.Function
 
         Returns:
-            LambdaResource bound to this environment
+            Pulumi Lambda function resource
         """
-        from glacier_aws.resources.compute import LambdaResource
+        try:
+            import pulumi_aws as aws
+        except ImportError:
+            raise ImportError(
+                "pulumi_aws not installed. Run: pip install glacier-pipeline[aws]"
+            )
 
-        return LambdaResource(
-            environment=self.environment,
-            memory=memory,
-            timeout=timeout,
+        # Merge environment tags
+        resource_tags = {**self.tags, **kwargs.pop("tags", {})}
+
+        # Create IAM role if not provided
+        if "role" not in kwargs:
+            role = aws.iam.Role(
+                f"{name}-role",
+                assume_role_policy="""{
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": {"Service": "lambda.amazonaws.com"},
+                        "Action": "sts:AssumeRole"
+                    }]
+                }""",
+                tags=resource_tags
+            )
+            kwargs["role"] = role.arn
+
+        return aws.lambda_.Function(
+            name,
+            name=name,
+            handler=handler,
+            code=code,
             runtime=runtime,
-            layers=layers or [],
-            reserved_concurrency=reserved_concurrency,
-            environment_vars=environment_vars or {},
+            tags=resource_tags,
             **kwargs
         )
-
-    def ecs(
-        self,
-        image: str,
-        cpu: int = 256,
-        memory: int = 512,
-        **kwargs
-    ):
-        """Create an ECS task in this environment"""
-        from glacier_aws.resources.compute import ECSResource
-
-        return ECSResource(
-            environment=self.environment,
-            image=image,
-            cpu=cpu,
-            memory=memory,
-            **kwargs
-        )
-
-
-class AWSDatabaseFactory:
-    """Factory for creating AWS database resources in this environment"""
-
-    def __init__(self, environment: AWSEnvironment):
-        self.environment = environment
 
     def rds(
         self,
-        instance_identifier: str,
+        name: str,
         engine: str = "postgres",
         instance_class: str = "db.t3.micro",
-        allocated_storage: int = 20,
         **kwargs
-    ):
-        """Create an RDS instance in this environment"""
-        from glacier_aws.resources.storage import RDSResource
+    ) -> Any:
+        """
+        Create an RDS instance with sensible defaults.
 
-        return RDSResource(
-            environment=self.environment,
-            instance_identifier=instance_identifier,
+        Args:
+            name: Instance identifier
+            engine: Database engine
+            instance_class: Instance class
+            **kwargs: Additional arguments passed to pulumi_aws.rds.Instance
+
+        Returns:
+            Pulumi RDS instance resource
+        """
+        try:
+            import pulumi_aws as aws
+        except ImportError:
+            raise ImportError(
+                "pulumi_aws not installed. Run: pip install glacier-pipeline[aws]"
+            )
+
+        resource_tags = {**self.tags, **kwargs.pop("tags", {})}
+
+        return aws.rds.Instance(
+            name,
+            identifier=name,
             engine=engine,
             instance_class=instance_class,
-            allocated_storage=allocated_storage,
+            tags=resource_tags,
             **kwargs
         )
 
-    def dynamodb(self, table_name: str, **kwargs):
-        """Create a DynamoDB table in this environment"""
-        from glacier_aws.resources.storage import DynamoDBResource
-
-        return DynamoDBResource(
-            environment=self.environment,
-            table_name=table_name,
-            **kwargs
-        )
+    def __repr__(self):
+        return f"Environment(name={self.name}, account={self.account}, region={self.region})"
