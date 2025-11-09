@@ -39,6 +39,9 @@ class LambdaResource(ComputeResource):
     def get_type(self) -> str:
         return "serverless"
 
+    def get_provider(self) -> str:
+        return "aws"
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "type": "serverless",
@@ -79,6 +82,9 @@ class ECSResource(ComputeResource):
 
     def get_type(self) -> str:
         return "container"
+
+    def get_provider(self) -> str:
+        return "aws"
 
     def to_dict(self) -> Dict[str, Any]:
         return {

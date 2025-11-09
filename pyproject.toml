@@ -44,13 +44,11 @@ all = [
     "glacier-gcp",
     "glacier-local",
 ]
-dev = [
-    "pytest>=7.0.0",
-    "pytest-cov>=4.0.0",
-    "black>=23.0.0",
-    "mypy>=1.0.0",
-    "ruff>=0.1.0",
-]
+
+[tool.uv.sources]
+glacier-aws = { workspace = true }
+glacier-gcp = { workspace = true }
+glacier-local = { workspace = true }
 
 [project.scripts]
 glacier = "glacier.cli.main:cli"
