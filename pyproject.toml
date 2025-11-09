@@ -31,10 +31,18 @@ dependencies = [
 
 [project.optional-dependencies]
 aws = [
-    "boto3>=1.28.0",
+    "glacier-aws",
 ]
 gcp = [
-    "google-cloud-storage>=2.10.0",
+    "glacier-gcp",
+]
+local = [
+    "glacier-local",
+]
+all = [
+    "glacier-aws",
+    "glacier-gcp",
+    "glacier-local",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -54,6 +62,13 @@ dev-dependencies = [
     "black>=23.0.0",
     "mypy>=1.0.0",
     "ruff>=0.1.0",
+]
+
+[tool.uv.workspace]
+members = [
+    "providers/glacier-aws",
+    "providers/glacier-gcp",
+    "providers/glacier-local",
 ]
 
 [tool.hatch.build.targets.wheel]
