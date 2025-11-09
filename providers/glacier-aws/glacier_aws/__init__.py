@@ -7,10 +7,13 @@ including Pulumi-based infrastructure compilation and execution.
 
 from glacier_aws.compiler import AWSCompiler
 from glacier_aws.executor import AWSExecutor
+from glacier_aws import storage, compute
 
 __all__ = [
     "AWSCompiler",
     "AWSExecutor",
+    "storage",
+    "compute",
 ]
 
 __version__ = "0.1.0"
