@@ -11,12 +11,64 @@ Glacier is a code-centric data pipeline framework with **progressive disclosure*
 
 Key innovation: **Type-driven DAG inference** - pipeline dependencies are automatically extracted from function type annotations using a novel `Annotated[Dataset, instance]` pattern.
 
+## Pre-Release Development Principles
+
+**⚠️ CRITICAL: This project is in pre-release (alpha). Read this carefully.**
+
+### API Design Philosophy
+
+We are **actively experimenting** with API design. This means:
+
+1. **NO backwards compatibility required** - The API is not fixed and will change
+2. **NO obligation to maintain failed experiments** - If an approach doesn't work, remove it entirely
+3. **NO users depend on this API yet** - We have complete freedom to redesign
+4. **Feel free to break things** - Boldly refactor, rename, restructure as needed
+5. **Delete liberally** - Remove code that doesn't serve the current vision
+
+When making changes:
+- Do NOT try to maintain backwards compatibility
+- Do NOT deprecate - just change or delete
+- Do NOT add compatibility layers or migration paths
+- DO feel free to completely redesign APIs that aren't working
+- DO remove entire modules/patterns if they're not pulling their weight
+
+### Modern Python (3.14) Standards
+
+We use **Python 3.14** as the target version. This means:
+
+1. **NEVER use `from __future__ import annotations`** - Not needed in Python 3.14
+2. **ALWAYS use builtin types for type hints**:
+   - ✅ `dict[str, int]` NOT ❌ `Dict[str, int]`
+   - ✅ `list[str]` NOT ❌ `List[str]`
+   - ✅ `set[int]` NOT ❌ `Set[int]`
+   - ✅ `tuple[str, ...]` NOT ❌ `Tuple[str, ...]`
+3. **Use modern type syntax** - Take advantage of Python 3.14 features
+
+Example of correct modern typing:
+
+```python
+# ✅ CORRECT - Modern Python 3.14
+def process_data(
+    items: list[str],
+    mapping: dict[str, int],
+    options: set[str] | None = None
+) -> tuple[dict[str, Any], list[str]]:
+    ...
+
+# ❌ WRONG - Old style
+from typing import List, Dict, Set, Tuple, Optional
+
+def process_data(
+    items: List[str],
+    mapping: Dict[str, int],
+    options: Optional[Set[str]] = None
+) -> Tuple[Dict[str, Any], List[str]]:
+    ...
+```
+
 ## Development Commands
 
 ```bash
-# Run tests (requires Python 3.11+, configured for 3.14)
-python3 test_new_annotated_design.py
-
 # Run examples (may need dependencies like pandas)
 python3 examples/three_layers.py
 python3 examples/provider_switching.py
@@ -230,9 +282,8 @@ advanced = Dataset("advanced", storage=bucket)
 
 ## Testing Strategy
 
-The project currently uses direct script execution for testing rather than pytest. Key test files:
+The project currently uses direct script execution for testing rather than pytest. Key example files:
 
-- `test_new_annotated_design.py` - Tests the Annotated pattern implementation
 - `examples/three_layers.py` - Demonstrates all three layers
 - `examples/provider_switching.py` - Shows provider switching
 
