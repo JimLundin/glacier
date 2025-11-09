@@ -2,7 +2,7 @@
 Demonstrates the three layers of explicitness in Glacier.
 
 Layer 1: Implicit - everything automatic
-Layer 2: Environment - organize by account/region
+Layer 2: Environment - organize by account/region (provider-agnostic!)
 Layer 3: Raw Pulumi - full control
 """
 
@@ -47,36 +47,44 @@ print(f"Results:\n{results['clean']}\n")
 
 
 # ============================================================================
-# Layer 2: ENVIRONMENT - Multi-account/region
+# Layer 2: ENVIRONMENT - Provider-agnostic with dependency injection
 # ============================================================================
 print("=" * 70)
-print("LAYER 2: ENVIRONMENT - Organize by environment")
+print("LAYER 2: ENVIRONMENT - Provider-agnostic!")
 print("=" * 70)
 
-from glacier_aws import Environment
+from glacier import Environment
+from glacier_aws import AWSProvider
 
-# Define environments - wraps Pulumi with convenience
-aws_prod = Environment(account="123456789012", region="us-east-1", name="prod")
-aws_dev = Environment(account="987654321098", region="us-west-2", name="dev")
+# Inject AWS provider into generic Environment
+aws_prod = Environment(
+    provider=AWSProvider(account="123456789012", region="us-east-1"),
+    name="prod"
+)
+
+aws_dev = Environment(
+    provider=AWSProvider(account="987654321098", region="us-west-2"),
+    name="dev"
+)
 
 print(f"✓ Environments defined:")
 print(f"  Production: {aws_prod}")
 print(f"  Development: {aws_dev}\n")
 
-# Create resources with automatic tagging
-# These are Pulumi resources under the hood!
-print("Creating resources (wraps Pulumi):")
-print('  prod_bucket = aws_prod.s3(bucket="prod-data")')
-print('  dev_bucket = aws_dev.s3(bucket="dev-data")')
+# Generic methods - work across any provider!
+print("Creating resources (provider-agnostic methods):")
+print('  storage = aws_prod.object_storage(name="data")')
+print('  compute = aws_prod.serverless(name="func", handler="index.handler", code=...)')
 print()
 print("Behind the scenes:")
-print("  → Calls pulumi_aws.s3.BucketV2()")
-print("  → Adds tags: {Environment: 'prod'}")
-print("  → Adds sensible defaults")
+print("  → Environment delegates to AWSProvider")
+print("  → AWSProvider calls pulumi_aws.s3.BucketV2()")
+print("  → Adds environment tags automatically")
 print()
-
-# Use in pipeline
-# prod_data = Dataset(name="data", storage=prod_bucket)
+print("To switch to Azure:")
+print('  azure_prod = Environment(provider=AzureProvider(...), name="prod")')
+print('  storage = azure_prod.object_storage(name="data")  # Now Blob Storage!')
+print()
 
 
 # ============================================================================
@@ -126,8 +134,11 @@ print("=" * 70)
 print("SUMMARY")
 print("=" * 70)
 print()
-print("Layer 1 → Layer 2 → Layer 3")
-print("Simple   → Environment → Raw Pulumi")
+print("Layer 1 → Layer 2            → Layer 3")
+print("Simple   → Environment        → Raw Pulumi")
+print("          (provider-agnostic!)")
 print()
-print("Start simple. Add complexity only when needed.")
+print("Key insight: Environment is now truly provider-agnostic.")
+print("Generic methods work across AWS, Azure, GCP.")
+print("Switch providers by changing config, not code.")
 print()

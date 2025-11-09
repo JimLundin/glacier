@@ -32,37 +32,64 @@ No configuration needed. Just define your pipeline and run it.
 
 ---
 
-### Layer 2: Explicit Environments
+### Layer 2: Environment (Provider-Agnostic!)
 When you need multi-account/multi-region or want to organize by environment.
 
-Our `Environment` wrapper provides **convenience over Pulumi** - sensible defaults, less boilerplate.
+**Key insight:** `Environment` is provider-agnostic. You inject the provider via dependency injection.
 
 ```python
-from glacier import Pipeline, Dataset
-from glacier_aws import Environment
+from glacier import Pipeline, Dataset, Environment
+from glacier_aws import AWSProvider
 
-# Define environments (wraps Pulumi with defaults)
-aws_prod = Environment(account="123456", region="us-east-1", name="prod")
-aws_dev = Environment(account="789012", region="us-west-2", name="dev")
+# Inject AWS provider into generic Environment
+env = Environment(
+    provider=AWSProvider(account="123456", region="us-east-1"),
+    name="prod"
+)
 
-# Resources get environment tags automatically
-prod_bucket = aws_prod.s3(bucket="prod-data")  # Creates pulumi_aws.s3.BucketV2
-dev_bucket = aws_dev.s3(bucket="dev-data")
+# Generic methods that work across any provider
+storage = env.object_storage(name="data")     # → S3 on AWS
+compute = env.serverless(name="func", ...)    # → Lambda on AWS
+db = env.database(name="db", engine="postgres")  # → RDS on AWS
 
 # Use in pipeline
-prod_data = Dataset(name="data", storage=prod_bucket)
-
-@pipeline.task()
-def process() -> prod_data:
-    return transform(data)
+data = Dataset(name="data", storage=storage)
 ```
 
-**What's happening:** `aws_prod.s3()` is just calling `pulumi_aws.s3.BucketV2()` with:
-- Automatic environment tags
-- Sensible defaults
-- Less boilerplate
+**To switch to Azure - just change the provider config:**
 
-You're still using Pulumi - we're just making it easier.
+```python
+from glacier_azure import AzureProvider
+
+env = Environment(
+    provider=AzureProvider(subscription="xyz", region="eastus"),
+    name="prod"
+)
+
+# SAME CODE! Different provider
+storage = env.object_storage(name="data")     # → Blob Storage
+compute = env.serverless(name="func", ...)    # → Azure Functions
+db = env.database(name="db", engine="postgres")  # → Azure SQL
+```
+
+**Multi-cloud - different providers per environment:**
+
+```python
+from glacier_aws import AWSProvider
+from glacier_azure import AzureProvider
+
+dev = Environment(provider=AWSProvider(...), name="dev")
+prod = Environment(provider=AzureProvider(...), name="prod")
+
+dev_storage = dev.object_storage(name="data")   # S3
+prod_storage = prod.object_storage(name="data") # Blob Storage
+```
+
+**What's happening under the hood:**
+- `Environment` provides generic methods: `object_storage()`, `serverless()`, `database()`
+- These delegate to the provider implementation (`AWSProvider`, `AzureProvider`, etc.)
+- Providers call Pulumi with sensible defaults: `pulumi_aws.s3.BucketV2()`, etc.
+- Automatic environment tagging and configuration
 
 ---
 
@@ -79,7 +106,7 @@ bucket = aws.s3.BucketV2(
     bucket="my-data",
     versioning=aws.s3.BucketVersioningArgs(
         enabled=True,
-        mfa_delete=True
+        mfa_delete=True  # Advanced feature!
     ),
     lifecycle_rules=[
         aws.s3.BucketLifecycleRuleArgs(
@@ -87,23 +114,19 @@ bucket = aws.s3.BucketV2(
             transitions=[{
                 "days": 30,
                 "storage_class": "GLACIER"
-            }, {
-                "days": 90,
-                "storage_class": "DEEP_ARCHIVE"
             }]
         )
-    ],
-    replication_configuration=aws.s3.BucketReplicationConfigurationArgs(
-        role=replication_role.arn,
-        rules=[...]
-    )
+    ]
 )
 
 # Use in pipeline like any other resource
 data = Dataset(name="data", storage=bucket)
+
+# Mix with Layer 2 resources!
+compute = env.serverless(name="func", ...)  # Layer 2
 ```
 
-**No wrappers, no abstractions** - just use Pulumi features directly.
+**No wrappers, no abstractions** - just use Pulumi features directly. Mix freely with Layer 2.
 
 ---
 
@@ -118,22 +141,39 @@ Python function decorated with `@pipeline.task()`. Dependencies inferred from pa
 ### Dataset
 Data artifact with optional storage. Accepts:
 - Nothing (ephemeral)
-- Our `ObjectStorage`/`Database` configs (provider-agnostic)
-- `Environment.s3()` / `Environment.rds()` (Pulumi with defaults)
-- Raw Pulumi resources (full control)
+- Our `ObjectStorage`/`Database` configs (provider-agnostic, Layer 1)
+- `Environment.object_storage()` / `Environment.database()` (provider-agnostic, Layer 2)
+- Raw Pulumi resources (provider-specific, Layer 3)
 
-### Environment (Optional)
-Convenience wrapper for organizing multi-account/region deployments. Creates Pulumi resources with sensible defaults.
+### Environment
+**Provider-agnostic** wrapper for organizing multi-account/region deployments.
+
+Generic methods:
+- `object_storage(name, **kwargs)` → S3, Blob Storage, GCS
+- `serverless(name, handler, code, **kwargs)` → Lambda, Functions, Cloud Run
+- `database(name, engine, **kwargs)` → RDS, Azure SQL, Cloud SQL
+
+You inject the provider via dependency injection: `Environment(provider=AWSProvider(...))`
+
+### Provider
+Provider implementations create Pulumi resources. Examples:
+- `AWSProvider` → Uses `pulumi_aws`
+- `AzureProvider` → Uses `pulumi_azure`
+- `GCPProvider` → Uses `pulumi_gcp`
+
+Providers implement the `Provider` interface with methods like `object_storage()`, `serverless()`, etc.
 
 ---
 
 ## Design Principles
 
 1. **Progressive disclosure**: Start simple, add complexity as needed
-2. **Pulumi, not abstraction**: We wrap Pulumi for convenience, not replace it
-3. **Always an escape hatch**: Can drop down to raw Pulumi anytime
-4. **Provider-agnostic core**: Base library has zero cloud dependencies
-5. **Type-driven**: DAG inferred from function signatures
+2. **Dependency injection**: Provider config injected into Environment
+3. **Provider-agnostic Layer 2**: Switch clouds by changing config, not code
+4. **Pulumi, not abstraction**: We wrap Pulumi for convenience, not replace it
+5. **Always an escape hatch**: Can drop down to raw Pulumi anytime
+6. **Provider-agnostic core**: Base library has zero cloud dependencies
+7. **Type-driven**: DAG inferred from function signatures
 
 ---
 
@@ -141,16 +181,23 @@ Convenience wrapper for organizing multi-account/region deployments. Creates Pul
 
 ```
 glacier/
-├── core/          # Pipeline, Task, Dataset (no cloud deps)
-├── storage/       # Generic ObjectStorage, Database configs
-└── compute/       # Generic Serverless, Container configs
+├── core/
+│   ├── pipeline.py       # Pipeline with auto DAG
+│   ├── task.py           # @task decorator
+│   ├── dataset.py        # Data artifacts
+│   └── environment.py    # Provider-agnostic Environment + Provider interface
+├── storage/              # Generic ObjectStorage, Database configs (Layer 1)
+└── compute/              # Generic Serverless, Container configs (Layer 1)
 
 providers/
 ├── glacier-aws/
-│   └── Environment    # Convenience wrapper over pulumi_aws
-├── glacier-gcp/       # (future)
+│   └── provider.py       # AWSProvider (implements Provider interface)
+├── glacier-azure/        # (future)
+│   └── provider.py       # AzureProvider
+├── glacier-gcp/          # (future)
+│   └── provider.py       # GCPProvider
 └── glacier-local/
-    └── LocalExecutor  # Run pipelines locally
+    └── executor.py       # LocalExecutor (run locally, no cloud)
 ```
 
 ---
@@ -158,8 +205,8 @@ providers/
 ## When to Use Each Layer
 
 **Layer 1 (Implicit):**
-- Single AWS account
-- Simple deployments
+- Single account deployment
+- Simple use cases
 - Prototyping/testing
 - Local development
 
@@ -168,6 +215,7 @@ providers/
 - Multi-region deployments
 - Want organized tagging
 - Want less Pulumi boilerplate
+- **Need to switch providers** (AWS → Azure → GCP)
 
 **Layer 3 (Raw Pulumi):**
 - Need specific Pulumi features
@@ -175,4 +223,28 @@ providers/
 - Advanced networking/security
 - Custom resource configurations
 
-Start with Layer 1. Move to Layer 2 when you need environments. Use Layer 3 when you need specific features.
+Start with Layer 1. Move to Layer 2 when you need environments or provider flexibility. Use Layer 3 when you need specific Pulumi features.
+
+---
+
+## Key Innovation: Provider-Agnostic Layer 2
+
+Unlike other frameworks, Glacier's Layer 2 is **truly provider-agnostic**:
+
+```python
+# Define once
+def create_env(provider):
+    return Environment(provider=provider, name="prod")
+
+# Deploy to any cloud
+aws_env = create_env(AWSProvider(account="123", region="us-east-1"))
+azure_env = create_env(AzureProvider(subscription="xyz", region="eastus"))
+gcp_env = create_env(GCPProvider(project="my-proj", region="us-central1"))
+
+# Same code works across all providers
+for env in [aws_env, azure_env, gcp_env]:
+    storage = env.object_storage(name="data")
+    compute = env.serverless(name="func", handler="index.handler", code=...)
+```
+
+Switch clouds by changing the provider config. No code changes needed.

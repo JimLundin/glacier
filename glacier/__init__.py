@@ -39,6 +39,7 @@ Example:
 from glacier.core.dataset import Dataset
 from glacier.core.task import task, Task
 from glacier.core.pipeline import Pipeline
+from glacier.core.environment import Environment, Provider
 import glacier.compute as compute
 
 __version__ = "0.2.0-alpha"
@@ -47,5 +48,7 @@ __all__ = [
     "task",
     "Task",
     "Pipeline",
+    "Environment",
+    "Provider",
     "compute",
 ]
