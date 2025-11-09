@@ -8,7 +8,7 @@ Tasks are the logic units in a pipeline. They:
 """
 
 import inspect
-from typing import Callable, List, Optional, Any, get_type_hints, get_origin, get_args
+from typing import Any, Callable, get_type_hints, get_origin, get_args
 from dataclasses import dataclass
 
 from glacier.core.dataset import Dataset
@@ -48,8 +48,8 @@ class Task:
 
         Looks at type annotations to find Dataset instances.
         """
-        self.inputs: List[DatasetParameter] = []
-        self.outputs: List[Dataset] = []
+        self.inputs: list[DatasetParameter] = []
+        self.outputs: list[Dataset] = []
 
         # Get type hints
         try:
@@ -133,7 +133,7 @@ class DatasetParameter:
     dataset: Dataset  # The dataset instance
 
 
-def task(fn: Optional[Callable] = None, **config) -> Task:
+def task(fn: Callable | None = None, **config) -> Task:
     """
     Decorator to mark a function as a pipeline task.
 

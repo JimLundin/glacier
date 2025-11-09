@@ -7,7 +7,7 @@ name = "glacier-gcp"
 version = "0.1.0"
 description = "GCP provider for Glacier data pipelines"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.14"
 license = { text = "MIT" }
 authors = [
     { name = "Glacier Team" }
@@ -16,7 +16,6 @@ dependencies = [
     "glacier-pipeline",
     "pulumi>=3.0.0",
     "pulumi-gcp>=7.0.0",
-    "google-cloud-storage>=2.10.0",
 ]
 
 [tool.uv.sources]

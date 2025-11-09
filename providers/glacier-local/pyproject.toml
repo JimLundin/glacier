@@ -7,7 +7,7 @@ name = "glacier-local"
 version = "0.1.0"
 description = "Local executor for Glacier data pipelines"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.14"
 license = { text = "MIT" }
 authors = [
     { name = "Glacier Team" }

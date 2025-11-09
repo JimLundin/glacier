@@ -2,7 +2,7 @@
 Local Executor: Runs Glacier pipelines locally.
 """
 
-from typing import Any, Dict
+from typing import Any
 from glacier.execution import Executor
 
 
@@ -21,7 +21,7 @@ class LocalExecutor(Executor):
             "tasks": {},
         }
 
-    def execute(self, pipeline) -> Dict[str, Any]:
+    def execute(self, pipeline) -> dict[str, Any]:
         """
         Execute pipeline locally.
 
@@ -95,6 +95,6 @@ class LocalExecutor(Executor):
         self.execution_status["state"] = "completed"
         return dataset_values
 
-    def get_status(self) -> Dict[str, Any]:
+    def get_status(self) -> dict[str, Any]:
         """Get execution status"""
         return self.execution_status

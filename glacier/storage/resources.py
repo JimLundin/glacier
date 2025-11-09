@@ -7,7 +7,7 @@ at compile/execution time.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Literal
+from typing import Any, Literal
 
 
 class StorageResource(ABC):
@@ -19,7 +19,7 @@ class StorageResource(ABC):
     """
 
     @abstractmethod
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """
         Convert to dictionary representation for infrastructure generation.
 
@@ -39,7 +39,7 @@ class StorageResource(ABC):
         pass
 
     @abstractmethod
-    def get_provider(self) -> Optional[str]:
+    def get_provider(self) -> str | None:
         """
         Get the specific provider if this is a provider-specific resource.
 
@@ -77,11 +77,11 @@ class ObjectStorage(StorageResource):
 
     def __init__(
         self,
-        resource_name: Optional[str] = None,
+        resource_name: str | None = None,
         access_pattern: Literal["frequent", "infrequent", "archive"] = "frequent",
         versioning: bool = False,
         encryption: bool = True,
-        lifecycle_days: Optional[int] = None,
+        lifecycle_days: int | None = None,
         **provider_hints
     ):
         """
@@ -105,14 +105,14 @@ class ObjectStorage(StorageResource):
     def get_type(self) -> str:
         return "object_storage"
 
-    def get_provider(self) -> Optional[str]:
+    def get_provider(self) -> str | None:
         return None  # Generic resource
 
     def supports_provider(self, provider: str) -> bool:
         """Object storage is supported by all providers"""
         return provider in ["aws", "gcp", "azure", "local"]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "type": "object_storage",
             "provider": None,
@@ -145,7 +145,7 @@ class Database(StorageResource):
         schema: Any,
         engine: Literal["postgres", "mysql", "sqlserver"] = "postgres",
         size: Literal["small", "medium", "large"] = "small",
-        resource_name: Optional[str] = None,
+        resource_name: str | None = None,
         high_availability: bool = False,
         backup_retention_days: int = 7,
         **provider_hints
@@ -173,14 +173,14 @@ class Database(StorageResource):
     def get_type(self) -> str:
         return "database"
 
-    def get_provider(self) -> Optional[str]:
+    def get_provider(self) -> str | None:
         return None  # Generic resource
 
     def supports_provider(self, provider: str) -> bool:
         """Database is supported by all providers"""
         return provider in ["aws", "gcp", "azure", "local"]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "type": "database",
             "provider": None,
@@ -211,9 +211,9 @@ class Cache(StorageResource):
     def __init__(
         self,
         size_mb: int = 512,
-        ttl_seconds: Optional[int] = None,
+        ttl_seconds: int | None = None,
         engine: Literal["redis", "memcached"] = "redis",
-        resource_name: Optional[str] = None,
+        resource_name: str | None = None,
         **provider_hints
     ):
         """
@@ -235,14 +235,14 @@ class Cache(StorageResource):
     def get_type(self) -> str:
         return "cache"
 
-    def get_provider(self) -> Optional[str]:
+    def get_provider(self) -> str | None:
         return None  # Generic resource
 
     def supports_provider(self, provider: str) -> bool:
         """Cache is supported by all providers"""
         return provider in ["aws", "gcp", "azure", "local"]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "type": "cache",
             "provider": None,
@@ -271,7 +271,7 @@ class Queue(StorageResource):
 
     def __init__(
         self,
-        resource_name: Optional[str] = None,
+        resource_name: str | None = None,
         fifo: bool = False,
         retention_seconds: int = 345600,  # 4 days default
         visibility_timeout: int = 30,
@@ -296,14 +296,14 @@ class Queue(StorageResource):
     def get_type(self) -> str:
         return "queue"
 
-    def get_provider(self) -> Optional[str]:
+    def get_provider(self) -> str | None:
         return None  # Generic resource
 
     def supports_provider(self, provider: str) -> bool:
         """Queue is supported by all providers"""
         return provider in ["aws", "gcp", "azure", "local"]
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "type": "queue",
             "provider": None,

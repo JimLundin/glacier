@@ -5,7 +5,7 @@ The Environment provides generic methods (object_storage, serverless, etc.)
 and delegates to provider-specific implementations via dependency injection.
 """
 
-from typing import Any, Optional, Dict
+from typing import Any
 from dataclasses import dataclass
 
 
@@ -73,7 +73,7 @@ class Environment:
     name: str = "default"
     """Environment name (dev, staging, prod, etc.)"""
 
-    tags: Optional[Dict[str, str]] = None
+    tags: dict[str, str] | None = None
     """Tags/labels to apply to all resources"""
 
     def __post_init__(self):
