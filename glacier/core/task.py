@@ -8,7 +8,7 @@ Tasks are the logic units in a pipeline. They:
 """
 
 import inspect
-from typing import Any, Callable, get_type_hints, get_origin, get_args
+from typing import Any, Callable, get_type_hints, get_origin, get_args, Annotated
 from dataclasses import dataclass
 
 from glacier.core.dataset import Dataset
@@ -42,18 +42,54 @@ class Task:
         self.signature = inspect.signature(fn)
         self._extract_datasets()
 
+    def _extract_dataset_from_annotation(self, annotation: Any) -> Dataset | None:
+        """
+        Extract a Dataset instance from a type annotation.
+
+        Supports two patterns:
+        1. Direct: annotation is a Dataset instance (legacy pattern)
+        2. Annotated: Annotated[Type, dataset] where dataset is in metadata
+
+        Args:
+            annotation: The type annotation to inspect
+
+        Returns:
+            Dataset instance if found, None otherwise
+        """
+        # Pattern 1: Direct Dataset instance (legacy, still supported)
+        if isinstance(annotation, Dataset):
+            return annotation
+
+        # Pattern 2: Annotated[Type, metadata, ...]
+        # Check if this is an Annotated type
+        if get_origin(annotation) is Annotated:
+            # Extract metadata from Annotated
+            args = get_args(annotation)
+            # args[0] is the actual type, args[1:] is the metadata tuple
+            if len(args) > 1:
+                # Search metadata for Dataset instances
+                for metadata_item in args[1:]:
+                    if isinstance(metadata_item, Dataset):
+                        return metadata_item
+
+        return None
+
     def _extract_datasets(self):
         """
         Extract input and output datasets from function signature.
 
-        Looks at type annotations to find Dataset instances.
+        Supports two annotation patterns:
+        1. Direct: def func(x: dataset) -> dataset
+        2. Annotated: def func(x: Annotated[Any, dataset]) -> Annotated[Any, dataset]
+
+        The Annotated pattern is recommended for type checker compatibility.
         """
         self.inputs: list[DatasetParameter] = []
         self.outputs: list[Dataset] = []
 
-        # Get type hints
+        # Get type hints with include_extras=True to preserve Annotated
         try:
-            hints = get_type_hints(self.fn)
+            hints = get_type_hints(self.fn, include_extras=True)
         except Exception:
             # If we can't get hints, try manual inspection
             hints = {}
@@ -68,24 +104,29 @@ class Task:
                 continue
 
             annotation = hints.get(param_name)
-            if annotation and isinstance(annotation, Dataset):
-                self.inputs.append(DatasetParameter(
-                    name=param_name,
-                    dataset=annotation
-                ))
+            if annotation:
+                dataset = self._extract_dataset_from_annotation(annotation)
+                if dataset:
+                    self.inputs.append(DatasetParameter(
+                        name=param_name,
+                        dataset=dataset
+                    ))
 
         # Extract output datasets from return annotation
         return_annotation = hints.get('return')
         if return_annotation:
-            if isinstance(return_annotation, Dataset):
-                # Single output
-                self.outputs.append(return_annotation)
+            # Check for single dataset (either direct or Annotated)
+            dataset = self._extract_dataset_from_annotation(return_annotation)
+            if dataset:
+                self.outputs.append(dataset)
+            # Check for Tuple of datasets
             elif get_origin(return_annotation) is tuple:
-                # Multiple outputs: Tuple[dataset_a, dataset_b]
+                # Multiple outputs: Tuple[dataset_a, dataset_b] or Tuple[Annotated[...], Annotated[...]]
                 args = get_args(return_annotation)
                 for arg in args:
-                    if isinstance(arg, Dataset):
-                        self.outputs.append(arg)
+                    dataset = self._extract_dataset_from_annotation(arg)
+                    if dataset:
+                        self.outputs.append(dataset)
 
     def __repr__(self):
         inputs_str = ", ".join(f"{p.name}: {p.dataset.name}" for p in self.inputs)
