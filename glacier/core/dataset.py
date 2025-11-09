@@ -5,6 +5,8 @@ A Dataset is a named data artifact that flows through the pipeline.
 It can be used in function signatures to declare inputs and outputs.
 """
 
+from __future__ import annotations
+
 from typing import Any
 from dataclasses import dataclass
 
@@ -132,7 +134,7 @@ class DatasetReference:
     Used internally to track dataset flow through the pipeline.
     """
     dataset: Dataset
-    producer_task: 'Task' | None = None
+    producer_task: Task | None = None
 
     def __repr__(self):
         return f"DatasetRef({self.dataset.name})"
