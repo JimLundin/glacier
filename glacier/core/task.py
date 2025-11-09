@@ -120,6 +120,11 @@ class Task:
         """Get the compute resource for this task"""
         return self.config.get('compute')
 
+    @property
+    def compute(self):
+        """Get the compute resource for this task"""
+        return self.config.get('compute')
+
 
 @dataclass
 class DatasetParameter:

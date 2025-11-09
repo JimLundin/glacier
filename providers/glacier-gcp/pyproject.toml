@@ -19,5 +19,8 @@ dependencies = [
     "google-cloud-storage>=2.10.0",
 ]
 
+[tool.uv.sources]
+glacier-pipeline = { workspace = true }
+
 [tool.hatch.build.targets.wheel]
 packages = ["glacier_gcp"]

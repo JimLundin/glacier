@@ -19,5 +19,8 @@ dependencies = [
     "boto3>=1.28.0",
 ]
 
+[tool.uv.sources]
+glacier-pipeline = { workspace = true }
+
 [tool.hatch.build.targets.wheel]
 packages = ["glacier_aws"]

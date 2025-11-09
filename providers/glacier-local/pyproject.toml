@@ -16,5 +16,8 @@ dependencies = [
     "glacier-pipeline",
 ]
 
+[tool.uv.sources]
+glacier-pipeline = { workspace = true }
+
 [tool.hatch.build.targets.wheel]
 packages = ["glacier_local"]

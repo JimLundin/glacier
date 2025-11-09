@@ -60,7 +60,7 @@ class LocalExecutor(Executor):
                         )
 
                 # Execute task
-                result = task.func(**kwargs)
+                result = task.fn(**kwargs)
 
                 # Store result in output datasets
                 if len(task.outputs) == 1:
