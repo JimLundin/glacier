@@ -7,9 +7,11 @@ as dependencies.
 """
 
 from glacier.compilation.compiler import Compiler, CompiledPipeline, CompilationContext
+from glacier.compilation.multicloud import MultiCloudCompiler
 
 __all__ = [
     "Compiler",
     "CompiledPipeline",
     "CompilationContext",
+    "MultiCloudCompiler",
 ]
