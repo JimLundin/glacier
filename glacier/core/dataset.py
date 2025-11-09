@@ -5,11 +5,8 @@ A Dataset is a named data artifact that flows through the pipeline.
 It can be used in function signatures to declare inputs and outputs.
 """
 
-from typing import Any, Optional, Dict, TYPE_CHECKING
+from typing import Any, Optional, Dict
 from dataclasses import dataclass
-
-if TYPE_CHECKING:
-    from glacier.storage.resources import StorageResource
 
 
 class Dataset:
@@ -34,7 +31,7 @@ class Dataset:
     def __init__(
         self,
         name: str,
-        storage: Optional['StorageResource'] = None,
+        storage: Optional[Any] = None,
         schema: Optional[Any] = None,
         metadata: Optional[Dict[str, Any]] = None
     ):
@@ -43,11 +40,11 @@ class Dataset:
 
         Args:
             name: Unique identifier for this dataset
-            storage: Where this dataset is stored (ObjectStorage, Database, etc.)
+            storage: Where this dataset is stored - can be our StorageResource OR a Pulumi resource
             schema: Schema definition for validation
             metadata: Additional metadata (partitioning, format, etc.)
 
-        Example:
+        Example - Option 1 (our config):
             from glacier import Dataset
             from glacier.storage import ObjectStorage
 
@@ -58,9 +55,20 @@ class Dataset:
                     versioning=True
                 )
             )
+
+        Example - Option 2 (Pulumi resource):
+            import pulumi_aws as aws
+
+            raw_data = Dataset(
+                "raw_data",
+                storage=aws.s3.Bucket(
+                    "my-bucket",
+                    versioning=aws.s3.BucketVersioningArgs(enabled=True)
+                )
+            )
         """
         self.name = name
-        self.storage = storage
+        self.storage = storage  # Can be our StorageResource or a Pulumi resource
         self.schema = schema
         self.metadata = metadata or {}
 
