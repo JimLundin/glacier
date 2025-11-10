@@ -1,7 +1,7 @@
 """
 AWS Compiler: Converts Glacier pipelines to AWS Pulumi resources.
 
-Generates infrastructure definitions for deploying pipelines on AWS:
+Creates actual Pulumi resource objects for deploying pipelines on AWS:
 - Lambda functions for tasks
 - S3 buckets for datasets
 - EventBridge rules for scheduling
@@ -10,7 +10,17 @@ Generates infrastructure definitions for deploying pipelines on AWS:
 """
 
 from typing import Any, TYPE_CHECKING
-from glacier.compilation.pulumi_compiler import PulumiCompiler, CompilationError
+
+try:
+    import pulumi
+    import pulumi_aws as aws
+except ImportError:
+    raise ImportError(
+        "pulumi and pulumi_aws required for AWSCompiler. "
+        "Install with: pip install pulumi pulumi-aws"
+    )
+
+from glacier.compilation.compiler import Compiler, CompiledPipeline, CompilationError
 
 if TYPE_CHECKING:
     from glacier.core.pipeline import Pipeline
@@ -18,9 +28,12 @@ if TYPE_CHECKING:
     from glacier.core.dataset import Dataset
 
 
-class AWSCompiler(PulumiCompiler):
+class AWSCompiler(Compiler):
     """
     Compiles Glacier pipelines to AWS infrastructure via Pulumi.
+
+    Creates actual Pulumi resource objects that are registered with
+    the Pulumi runtime.
     """
 
     def __init__(
@@ -38,13 +51,14 @@ class AWSCompiler(PulumiCompiler):
         Args:
             account: AWS account ID
             region: AWS region
-            project_name: Optional Pulumi project name override
+            project_name: Optional project name
             lambda_runtime: Lambda runtime version
             lambda_memory: Default Lambda memory in MB
             lambda_timeout: Default Lambda timeout in seconds
         """
-        super().__init__(region=region, project_name=project_name)
         self.account = account
+        self.region = region
+        self.project_name = project_name
         self.lambda_runtime = lambda_runtime
         self.lambda_memory = lambda_memory
         self.lambda_timeout = lambda_timeout
@@ -52,11 +66,67 @@ class AWSCompiler(PulumiCompiler):
     def get_provider_name(self) -> str:
         return "aws"
 
+    def compile(self, pipeline: 'Pipeline') -> CompiledPipeline:
+        """
+        Compile a pipeline to AWS Pulumi resources.
+
+        Args:
+            pipeline: The pipeline to compile
+
+        Returns:
+            CompiledPipeline with actual Pulumi resource objects
+
+        Raises:
+            CompilationError: If compilation fails
+        """
+        try:
+            # Validate pipeline
+            pipeline.validate()
+
+            # Create resources
+            resources = {}
+
+            # Compile storage resources (S3 buckets)
+            storage_resources = self._compile_storage(pipeline)
+            resources.update(storage_resources)
+
+            # Compile compute resources (Lambda functions)
+            compute_resources = self._compile_compute(pipeline, storage_resources)
+            resources.update(compute_resources)
+
+            # Compile scheduling resources (EventBridge rules)
+            scheduling_resources = self._compile_scheduling(pipeline, compute_resources)
+            resources.update(scheduling_resources)
+
+            # Compile monitoring resources (CloudWatch)
+            monitoring_resources = self._compile_monitoring(pipeline, compute_resources)
+            resources.update(monitoring_resources)
+
+            # Compile secrets resources (Secrets Manager)
+            secrets_resources = self._compile_secrets(pipeline)
+            resources.update(secrets_resources)
+
+            return CompiledPipeline(
+                pipeline_name=pipeline.name,
+                provider_name=self.get_provider_name(),
+                resources=resources,
+                metadata={
+                    "region": self.region,
+                    "account": self.account,
+                    "task_count": len(pipeline.tasks),
+                    "dataset_count": len(pipeline.datasets),
+                }
+            )
+
+        except Exception as e:
+            raise CompilationError(f"Failed to compile pipeline '{pipeline.name}': {e}") from e
+
     def _compile_storage(self, pipeline: 'Pipeline') -> dict[str, Any]:
         """
-        Compile storage resources (S3 buckets) for datasets.
+        Create S3 buckets for datasets with storage configuration.
 
-        Creates an S3 bucket for each dataset that has storage configured.
+        Returns:
+            Dictionary mapping resource names to Pulumi S3 bucket objects
         """
         resources = {}
 
@@ -64,20 +134,31 @@ class AWSCompiler(PulumiCompiler):
             # Check if dataset has storage configuration
             if hasattr(dataset, 'storage') and dataset.storage is not None:
                 bucket_name = self._get_bucket_name(pipeline, dataset)
-                resources[bucket_name] = {
-                    "type": "s3_bucket",
-                    "dataset": dataset.name,
-                    "bucket_name": bucket_name,
-                    "storage_config": dataset.storage,
-                }
+
+                # Create actual S3 bucket resource
+                bucket = aws.s3.BucketV2(
+                    bucket_name,
+                    bucket=bucket_name,
+                    tags={
+                        "dataset": dataset.name,
+                        "pipeline": pipeline.name,
+                    }
+                )
+
+                resources[bucket_name] = bucket
 
         return resources
 
-    def _compile_compute(self, pipeline: 'Pipeline') -> dict[str, Any]:
+    def _compile_compute(self, pipeline: 'Pipeline', storage_resources: dict[str, Any]) -> dict[str, Any]:
         """
-        Compile compute resources (Lambda functions) for tasks.
+        Create Lambda functions for tasks.
 
-        Creates a Lambda function for each task in the pipeline.
+        Args:
+            pipeline: Source pipeline
+            storage_resources: Storage resources created earlier
+
+        Returns:
+            Dictionary mapping resource names to Pulumi Lambda and IAM objects
         """
         resources = {}
 
@@ -96,42 +177,74 @@ class AWSCompiler(PulumiCompiler):
                 if hasattr(compute_config, 'timeout'):
                     timeout = compute_config.timeout
 
-            resources[function_name] = {
-                "type": "lambda_function",
-                "task": task.name,
-                "function_name": function_name,
-                "handler": f"{task.name}.handler",
-                "runtime": self.lambda_runtime,
-                "memory": memory,
-                "timeout": timeout,
-                "code_path": f"./.glacier/compiled/{task.name}",
-                "inputs": [ds.name for ds in task.inputs],
-                "outputs": [ds.name for ds in task.outputs],
-            }
-
             # Create IAM role for Lambda
             role_name = f"{function_name}-role"
-            resources[role_name] = {
-                "type": "iam_role",
-                "function": function_name,
-                "role_name": role_name,
-            }
+            role = aws.iam.Role(
+                role_name,
+                name=role_name,
+                assume_role_policy=pulumi.Output.from_input({
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": {"Service": "lambda.amazonaws.com"},
+                        "Action": "sts:AssumeRole"
+                    }]
+                }).apply(lambda policy: pulumi.Output.json_dumps(policy))
+            )
+            resources[role_name] = role
 
-            # Attach policies for S3 access
+            # Create IAM policy for Lambda to access S3 and CloudWatch
             policy_name = f"{function_name}-policy"
-            resources[policy_name] = {
-                "type": "iam_role_policy",
-                "role": role_name,
-                "policy_name": policy_name,
-            }
+            policy = aws.iam.RolePolicy(
+                policy_name,
+                role=role.name,
+                policy=pulumi.Output.from_input({
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": ["s3:*"],
+                            "Resource": "*"
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": ["logs:*"],
+                            "Resource": "*"
+                        }
+                    ]
+                }).apply(lambda policy: pulumi.Output.json_dumps(policy))
+            )
+            resources[policy_name] = policy
+
+            # Create Lambda function
+            function = aws.lambda_.Function(
+                function_name,
+                name=function_name,
+                handler=f"{task.name}.handler",
+                runtime=self.lambda_runtime,
+                memory_size=memory,
+                timeout=timeout,
+                role=role.arn,
+                code=pulumi.FileArchive(f"./.glacier/compiled/{task.name}"),
+                tags={
+                    "task": task.name,
+                    "pipeline": pipeline.name,
+                }
+            )
+            resources[function_name] = function
 
         return resources
 
-    def _compile_scheduling(self, pipeline: 'Pipeline') -> dict[str, Any]:
+    def _compile_scheduling(self, pipeline: 'Pipeline', compute_resources: dict[str, Any]) -> dict[str, Any]:
         """
-        Compile scheduling resources (EventBridge rules) for scheduled tasks.
+        Create EventBridge rules for scheduled tasks.
 
-        Creates EventBridge rules for tasks with cron or event-based schedules.
+        Args:
+            pipeline: Source pipeline
+            compute_resources: Compute resources (Lambda functions)
+
+        Returns:
+            Dictionary mapping resource names to Pulumi EventBridge objects
         """
         resources = {}
 
@@ -140,56 +253,77 @@ class AWSCompiler(PulumiCompiler):
             if schedule is None:
                 continue
 
-            rule_name = self._get_rule_name(pipeline, task)
             function_name = self._get_function_name(pipeline, task)
+            function = compute_resources.get(function_name)
+            if function is None:
+                continue
 
-            # Determine schedule type
+            rule_name = self._get_rule_name(pipeline, task)
             schedule_type = type(schedule).__name__
 
+            # Create EventBridge rule
             if schedule_type == "CronSchedule":
                 # Cron-based schedule
-                resources[rule_name] = {
-                    "type": "eventbridge_cron_rule",
-                    "task": task.name,
-                    "rule_name": rule_name,
-                    "function": function_name,
-                    "cron_expression": schedule.expression,
-                }
+                rule = aws.cloudwatch.EventRule(
+                    rule_name,
+                    name=rule_name,
+                    schedule_expression=f"cron({schedule.expression})",
+                    tags={
+                        "task": task.name,
+                        "pipeline": pipeline.name,
+                    }
+                )
             elif schedule_type == "EventTrigger":
                 # Event-based trigger (S3 upload, etc.)
-                resources[rule_name] = {
-                    "type": "eventbridge_event_rule",
-                    "task": task.name,
-                    "rule_name": rule_name,
-                    "function": function_name,
-                    "trigger_datasets": [ds.name for ds in schedule.datasets],
-                    "filter_pattern": getattr(schedule, 'filter_pattern', None),
-                }
+                rule = aws.cloudwatch.EventRule(
+                    rule_name,
+                    name=rule_name,
+                    event_pattern=pulumi.Output.from_input({
+                        "source": ["aws.s3"],
+                        "detail-type": ["Object Created"]
+                    }).apply(lambda pattern: pulumi.Output.json_dumps(pattern)),
+                    tags={
+                        "task": task.name,
+                        "pipeline": pipeline.name,
+                    }
+                )
+            else:
+                continue
 
-            # Create Lambda permission for EventBridge
-            permission_name = f"{function_name}-eventbridge-permission"
-            resources[permission_name] = {
-                "type": "lambda_permission",
-                "function": function_name,
-                "permission_name": permission_name,
-                "principal": "events.amazonaws.com",
-                "source_arn": f"rule:{rule_name}",
-            }
+            resources[rule_name] = rule
 
             # Create EventBridge target
             target_name = f"{rule_name}-target"
-            resources[target_name] = {
-                "type": "eventbridge_target",
-                "rule": rule_name,
-                "target_name": target_name,
-                "function": function_name,
-            }
+            target = aws.cloudwatch.EventTarget(
+                target_name,
+                rule=rule.name,
+                arn=function.arn
+            )
+            resources[target_name] = target
+
+            # Create Lambda permission for EventBridge
+            permission_name = f"{function_name}-eventbridge-permission"
+            permission = aws.lambda_.Permission(
+                permission_name,
+                action="lambda:InvokeFunction",
+                function=function.name,
+                principal="events.amazonaws.com",
+                source_arn=rule.arn
+            )
+            resources[permission_name] = permission
 
         return resources
 
-    def _compile_monitoring(self, pipeline: 'Pipeline') -> dict[str, Any]:
+    def _compile_monitoring(self, pipeline: 'Pipeline', compute_resources: dict[str, Any]) -> dict[str, Any]:
         """
-        Compile monitoring resources (CloudWatch logs, metrics, alarms).
+        Create CloudWatch log groups and alarms for monitoring.
+
+        Args:
+            pipeline: Source pipeline
+            compute_resources: Compute resources (Lambda functions)
+
+        Returns:
+            Dictionary mapping resource names to Pulumi CloudWatch objects
         """
         resources = {}
 
@@ -198,6 +332,9 @@ class AWSCompiler(PulumiCompiler):
 
         for task in pipeline.tasks:
             function_name = self._get_function_name(pipeline, task)
+            function = compute_resources.get(function_name)
+            if function is None:
+                continue
 
             # CloudWatch log group for Lambda
             log_group_name = f"{function_name}-logs"
@@ -206,42 +343,60 @@ class AWSCompiler(PulumiCompiler):
             if monitoring_config and hasattr(monitoring_config, 'log_retention_days'):
                 retention_days = monitoring_config.log_retention_days
 
-            resources[log_group_name] = {
-                "type": "cloudwatch_log_group",
-                "function": function_name,
-                "log_group_name": f"/aws/lambda/{function_name}",
-                "retention_days": retention_days,
-            }
+            log_group = aws.cloudwatch.LogGroup(
+                log_group_name,
+                name=f"/aws/lambda/{function_name}",
+                retention_in_days=retention_days
+            )
+            resources[log_group_name] = log_group
 
             # CloudWatch alarm for Lambda errors
             if monitoring_config and getattr(monitoring_config, 'alert_on_failure', False):
                 alarm_name = f"{function_name}-errors-alarm"
-                resources[alarm_name] = {
-                    "type": "cloudwatch_alarm",
-                    "function": function_name,
-                    "alarm_name": alarm_name,
-                    "metric_name": "Errors",
-                    "threshold": 1,
-                }
 
-                # SNS topic for notifications
+                # Create SNS topic for notifications if configured
+                sns_topic = None
                 if hasattr(monitoring_config, 'notifications') and monitoring_config.notifications:
                     topic_name = f"{pipeline.name}-alerts"
                     if topic_name not in resources:
-                        resources[topic_name] = {
-                            "type": "sns_topic",
-                            "topic_name": topic_name,
-                            "notifications": monitoring_config.notifications,
-                        }
+                        sns_topic = aws.sns.Topic(
+                            topic_name,
+                            name=topic_name
+                        )
+                        resources[topic_name] = sns_topic
+                    else:
+                        sns_topic = resources[topic_name]
 
-                    # Subscribe alarm to SNS topic
-                    resources[alarm_name]["sns_topic"] = topic_name
+                alarm_actions = [sns_topic.arn] if sns_topic else []
+
+                alarm = aws.cloudwatch.MetricAlarm(
+                    alarm_name,
+                    name=alarm_name,
+                    comparison_operator="GreaterThanThreshold",
+                    evaluation_periods=1,
+                    metric_name="Errors",
+                    namespace="AWS/Lambda",
+                    period=300,
+                    statistic="Sum",
+                    threshold=1,
+                    alarm_actions=alarm_actions,
+                    dimensions={
+                        "FunctionName": function.name
+                    }
+                )
+                resources[alarm_name] = alarm
 
         return resources
 
     def _compile_secrets(self, pipeline: 'Pipeline') -> dict[str, Any]:
         """
-        Compile secrets resources (Secrets Manager secrets).
+        Create Secrets Manager secrets.
+
+        Args:
+            pipeline: Source pipeline
+
+        Returns:
+            Dictionary mapping resource names to Pulumi Secrets Manager objects
         """
         resources = {}
 
@@ -250,231 +405,6 @@ class AWSCompiler(PulumiCompiler):
         # For now, we'll create a placeholder for future implementation
 
         return resources
-
-    def _to_python_identifier(self, name: str) -> str:
-        """Convert a resource name to a valid Python identifier."""
-        return name.replace("-", "_")
-
-    def _generate_resource_code(self, resource_name: str, resource_def: dict) -> str:
-        """
-        Generate Pulumi Python code for a specific AWS resource.
-        """
-        resource_type = resource_def["type"]
-
-        if resource_type == "s3_bucket":
-            return self._generate_s3_bucket_code(resource_name, resource_def)
-        elif resource_type == "lambda_function":
-            return self._generate_lambda_function_code(resource_name, resource_def)
-        elif resource_type == "iam_role":
-            return self._generate_iam_role_code(resource_name, resource_def)
-        elif resource_type == "iam_role_policy":
-            return self._generate_iam_policy_code(resource_name, resource_def)
-        elif resource_type == "eventbridge_cron_rule":
-            return self._generate_eventbridge_cron_code(resource_name, resource_def)
-        elif resource_type == "eventbridge_event_rule":
-            return self._generate_eventbridge_event_code(resource_name, resource_def)
-        elif resource_type == "eventbridge_target":
-            return self._generate_eventbridge_target_code(resource_name, resource_def)
-        elif resource_type == "lambda_permission":
-            return self._generate_lambda_permission_code(resource_name, resource_def)
-        elif resource_type == "cloudwatch_log_group":
-            return self._generate_cloudwatch_log_group_code(resource_name, resource_def)
-        elif resource_type == "cloudwatch_alarm":
-            return self._generate_cloudwatch_alarm_code(resource_name, resource_def)
-        elif resource_type == "sns_topic":
-            return self._generate_sns_topic_code(resource_name, resource_def)
-        else:
-            return f"# Unknown resource type: {resource_type}"
-
-    def _generate_s3_bucket_code(self, name: str, resource_def: dict) -> str:
-        var_name = self._to_python_identifier(name)
-        bucket_name = resource_def["bucket_name"]
-        return f'''
-# S3 Bucket for dataset: {resource_def["dataset"]}
-{var_name} = aws.s3.BucketV2(
-    "{name}",
-    bucket="{bucket_name}",
-    tags={{"dataset": "{resource_def["dataset"]}"}}
-)
-'''
-
-    def _generate_lambda_function_code(self, name: str, resource_def: dict) -> str:
-        var_name = self._to_python_identifier(name)
-        function_name = resource_def["function_name"]
-        role_name = self._to_python_identifier(resource_def["function_name"] + "-role")
-        return f'''
-# Lambda function for task: {resource_def["task"]}
-{var_name} = aws.lambda_.Function(
-    "{name}",
-    name="{function_name}",
-    handler="{resource_def["handler"]}",
-    runtime="{resource_def["runtime"]}",
-    memory_size={resource_def["memory"]},
-    timeout={resource_def["timeout"]},
-    role={role_name}.arn,
-    code=pulumi.FileArchive("{resource_def["code_path"]}"),
-    tags={{"task": "{resource_def["task"]}"}}
-)
-'''
-
-    def _generate_iam_role_code(self, name: str, resource_def: dict) -> str:
-        var_name = self._to_python_identifier(name)
-        role_name = resource_def["role_name"]
-        return f'''
-# IAM role for Lambda function
-{var_name} = aws.iam.Role(
-    "{name}",
-    name="{role_name}",
-    assume_role_policy="""{{
-        "Version": "2012-10-17",
-        "Statement": [{{
-            "Effect": "Allow",
-            "Principal": {{"Service": "lambda.amazonaws.com"}},
-            "Action": "sts:AssumeRole"
-        }}]
-    }}"""
-)
-'''
-
-    def _generate_iam_policy_code(self, name: str, resource_def: dict) -> str:
-        var_name = self._to_python_identifier(name)
-        role_name = self._to_python_identifier(resource_def["role"])
-        return f'''
-# IAM policy for Lambda function
-{var_name} = aws.iam.RolePolicy(
-    "{name}",
-    role={role_name}.name,
-    policy="""{{
-        "Version": "2012-10-17",
-        "Statement": [
-            {{
-                "Effect": "Allow",
-                "Action": ["s3:*"],
-                "Resource": "*"
-            }},
-            {{
-                "Effect": "Allow",
-                "Action": ["logs:*"],
-                "Resource": "*"
-            }}
-        ]
-    }}"""
-)
-'''
-
-    def _generate_eventbridge_cron_code(self, name: str, resource_def: dict) -> str:
-        var_name = self._to_python_identifier(name)
-        rule_name = resource_def["rule_name"]
-        return f'''
-# EventBridge cron rule for task: {resource_def["task"]}
-{var_name} = aws.cloudwatch.EventRule(
-    "{name}",
-    name="{rule_name}",
-    schedule_expression="cron({resource_def["cron_expression"]})",
-    tags={{"task": "{resource_def["task"]}"}}
-)
-'''
-
-    def _generate_eventbridge_event_code(self, name: str, resource_def: dict) -> str:
-        var_name = self._to_python_identifier(name)
-        rule_name = resource_def["rule_name"]
-        return f'''
-# EventBridge event rule for task: {resource_def["task"]}
-{var_name} = aws.cloudwatch.EventRule(
-    "{name}",
-    name="{rule_name}",
-    event_pattern="""{{
-        "source": ["aws.s3"],
-        "detail-type": ["Object Created"]
-    }}""",
-    tags={{"task": "{resource_def["task"]}"}}
-)
-'''
-
-    def _generate_eventbridge_target_code(self, name: str, resource_def: dict) -> str:
-        var_name = self._to_python_identifier(name)
-        rule_name = self._to_python_identifier(resource_def["rule"])
-        function_name = self._to_python_identifier(resource_def["function"])
-        return f'''
-# EventBridge target
-{var_name} = aws.cloudwatch.EventTarget(
-    "{name}",
-    rule={rule_name}.name,
-    arn={function_name}.arn
-)
-'''
-
-    def _generate_lambda_permission_code(self, name: str, resource_def: dict) -> str:
-        var_name = self._to_python_identifier(name)
-        function_name = self._to_python_identifier(resource_def["function"])
-        return f'''
-# Lambda permission for EventBridge
-{var_name} = aws.lambda_.Permission(
-    "{name}",
-    action="lambda:InvokeFunction",
-    function={function_name}.name,
-    principal="{resource_def["principal"]}"
-)
-'''
-
-    def _generate_cloudwatch_log_group_code(self, name: str, resource_def: dict) -> str:
-        var_name = self._to_python_identifier(name)
-        log_group_name = resource_def["log_group_name"]
-        return f'''
-# CloudWatch log group for Lambda
-{var_name} = aws.cloudwatch.LogGroup(
-    "{name}",
-    name="{log_group_name}",
-    retention_in_days={resource_def["retention_days"]}
-)
-'''
-
-    def _generate_cloudwatch_alarm_code(self, name: str, resource_def: dict) -> str:
-        var_name = self._to_python_identifier(name)
-        alarm_name = resource_def["alarm_name"]
-        function_name = self._to_python_identifier(resource_def["function"])
-        sns_topic = resource_def.get("sns_topic")
-        sns_topic_var = self._to_python_identifier(sns_topic) if sns_topic else None
-        alarm_actions = f"[{sns_topic_var}.arn]" if sns_topic_var else "[]"
-        return f'''
-# CloudWatch alarm for Lambda errors
-{var_name} = aws.cloudwatch.MetricAlarm(
-    "{name}",
-    name="{alarm_name}",
-    comparison_operator="GreaterThanThreshold",
-    evaluation_periods=1,
-    metric_name="{resource_def["metric_name"]}",
-    namespace="AWS/Lambda",
-    period=300,
-    statistic="Sum",
-    threshold={resource_def["threshold"]},
-    alarm_actions={alarm_actions},
-    dimensions={{"FunctionName": {function_name}.name}}
-)
-'''
-
-    def _generate_sns_topic_code(self, name: str, resource_def: dict) -> str:
-        var_name = self._to_python_identifier(name)
-        topic_name = resource_def["topic_name"]
-        return f'''
-# SNS topic for alerts
-{var_name} = aws.sns.Topic(
-    "{name}",
-    name="{topic_name}"
-)
-'''
-
-    def _generate_imports(self) -> str:
-        """Generate import statements for AWS Pulumi program."""
-        return """import pulumi
-import pulumi_aws as aws"""
-
-    def _get_pulumi_dependencies(self) -> list[str]:
-        """Get list of Python dependencies for AWS Pulumi program."""
-        return [
-            "pulumi>=3.0.0",
-            "pulumi-aws>=6.0.0",
-        ]
 
     # Helper methods for resource naming
     def _get_bucket_name(self, pipeline: 'Pipeline', dataset: 'Dataset') -> str:
