@@ -5,9 +5,13 @@ from glacier.compilation.compiler import (
     CompiledPipeline,
     CompilationError,
 )
+from glacier.compilation.pulumi_compiler import (
+    PulumiCompiler,
+)
 
 __all__ = [
     "Compiler",
     "CompiledPipeline",
     "CompilationError",
+    "PulumiCompiler",
 ]

@@ -108,7 +108,6 @@ class AWSCompiler(Compiler):
 
             return CompiledPipeline(
                 pipeline_name=pipeline.name,
-                provider_name=self.get_provider_name(),
                 resources=resources,
                 metadata={
                     "region": self.region,

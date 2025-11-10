@@ -1,8 +1,8 @@
 """
-Compiler: Abstract interface for pipeline compilation.
+Compiler: Provider-agnostic pipeline compilation to Pulumi resources.
 
-Compilers are provider-specific plugins that transform Glacier pipelines
-into deployable infrastructure definitions (Pulumi, Terraform, etc.).
+Handles multi-cloud pipelines where different tasks and datasets
+may use different cloud providers (AWS, GCP, Azure).
 """
 
 from abc import ABC, abstractmethod
@@ -18,13 +18,12 @@ class CompiledPipeline:
     Represents a compiled pipeline with Pulumi resources.
 
     Contains actual Pulumi resource objects that have been registered
-    with the Pulumi runtime.
+    with the Pulumi runtime. Supports multi-cloud pipelines.
     """
 
     def __init__(
         self,
         pipeline_name: str,
-        provider_name: str,
         resources: dict[str, Any],
         metadata: dict[str, Any] | None = None
     ):
@@ -33,12 +32,10 @@ class CompiledPipeline:
 
         Args:
             pipeline_name: Name of the source pipeline
-            provider_name: Cloud provider (aws, gcp, azure)
-            resources: Dictionary of Pulumi resource objects
+            resources: Dictionary of Pulumi resource objects (multi-cloud)
             metadata: Optional metadata about compilation
         """
         self.pipeline_name = pipeline_name
-        self.provider_name = provider_name
         self.resources = resources
         self.metadata = metadata or {}
 
@@ -49,6 +46,33 @@ class CompiledPipeline:
     def list_resources(self) -> list[str]:
         """List all resource names."""
         return list(self.resources.keys())
+
+    def get_resources_by_provider(self) -> dict[str, list[str]]:
+        """
+        Group resources by cloud provider.
+
+        Returns:
+            Dictionary mapping provider names to lists of resource names
+        """
+        by_provider = {}
+        for name, resource in self.resources.items():
+            provider = self._infer_provider(resource)
+            if provider not in by_provider:
+                by_provider[provider] = []
+            by_provider[provider].append(name)
+        return by_provider
+
+    def _infer_provider(self, resource: Any) -> str:
+        """Infer provider from Pulumi resource type."""
+        resource_type = type(resource).__module__
+        if 'pulumi_aws' in resource_type:
+            return 'aws'
+        elif 'pulumi_gcp' in resource_type:
+            return 'gcp'
+        elif 'pulumi_azure' in resource_type or 'pulumi_azure_native' in resource_type:
+            return 'azure'
+        else:
+            return 'unknown'
 
     def export_outputs(self) -> dict[str, Any]:
         """
@@ -78,14 +102,15 @@ class Compiler(ABC):
     """
     Abstract compiler interface.
 
-    Provider-specific compilers implement this interface to transform
-    Glacier pipelines into deployable infrastructure.
+    Provider-agnostic compilers implement this interface to transform
+    Glacier pipelines into deployable infrastructure across multiple clouds.
 
     The compiler is responsible for:
     1. Analyzing the pipeline DAG and resources
-    2. Generating cloud-specific infrastructure definitions
-    3. Configuring networking, IAM, and security
-    4. Creating deployment artifacts (Pulumi programs, etc.)
+    2. Determining which provider each resource uses
+    3. Creating cloud-specific compute resources (Lambda, Cloud Functions, etc.)
+    4. Setting up cross-cloud IAM and networking
+    5. Wiring together the infrastructure
     """
 
     @abstractmethod
@@ -101,16 +126,6 @@ class Compiler(ABC):
 
         Raises:
             CompilationError: If compilation fails
-        """
-        pass
-
-    @abstractmethod
-    def get_provider_name(self) -> str:
-        """
-        Get the provider name for this compiler.
-
-        Returns:
-            Provider name (e.g., "aws", "gcp", "azure")
         """
         pass
 
