@@ -5,7 +5,7 @@ These resources define WHEN tasks should execute, without being tied
 to a specific provider implementation.
 """
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import Any, Literal, Annotated, get_origin, get_args
 from dataclasses import dataclass, field
 
@@ -53,39 +53,7 @@ class ScheduleResource(ABC):
     without being tied to a specific provider (EventBridge, Cloud
     Scheduler, cron, etc.).
     """
-
-    @abstractmethod
-    def to_dict(self) -> dict[str, Any]:
-        """
-        Convert to dictionary representation for infrastructure generation.
-
-        Returns:
-            Dictionary with resource configuration
-        """
-        pass
-
-    @abstractmethod
-    def get_type(self) -> str:
-        """
-        Get the resource type identifier.
-
-        Returns:
-            Resource type string ('cron', 'event', 'manual', etc.)
-        """
-        pass
-
-    @abstractmethod
-    def supports_provider(self, provider: str) -> bool:
-        """
-        Check if this resource can be compiled to the given provider.
-
-        Args:
-            provider: Provider name ('aws', 'gcp', 'azure', 'local')
-
-        Returns:
-            True if this resource supports the provider
-        """
-        pass
+    pass
 
 
 @dataclass
@@ -117,22 +85,6 @@ class CronSchedule(ScheduleResource):
 
     description: str | None = None
     """Optional description of the schedule"""
-
-    def get_type(self) -> str:
-        return "cron"
-
-    def supports_provider(self, provider: str) -> bool:
-        """Cron schedules are supported by all providers"""
-        return provider in ["aws", "gcp", "azure", "local"]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "cron",
-            "cron_expression": self.cron_expression,
-            "timezone": self.timezone,
-            "enabled": self.enabled,
-            "description": self.description,
-        }
 
     def __repr__(self):
         status = "enabled" if self.enabled else "disabled"
@@ -172,25 +124,6 @@ class EventTrigger(ScheduleResource):
     description: str | None = None
     """Optional description of the trigger"""
 
-    def get_type(self) -> str:
-        return "event"
-
-    def supports_provider(self, provider: str) -> bool:
-        """Event triggers are supported by all providers"""
-        return provider in ["aws", "gcp", "azure", "local"]
-
-    def to_dict(self) -> dict[str, Any]:
-        # Serialize datasets by name for infrastructure generation
-        dataset_names = [ds.name for ds in self.trigger_datasets]
-        return {
-            "type": "event",
-            "trigger_datasets": dataset_names,
-            "event_type": self.event_type,
-            "filter_pattern": self.filter_pattern,
-            "enabled": self.enabled,
-            "description": self.description,
-        }
-
     def __repr__(self):
         if self.trigger_datasets:
             datasets_str = ", ".join(ds.name for ds in self.trigger_datasets)
@@ -216,19 +149,6 @@ class ManualTrigger(ScheduleResource):
 
     description: str | None = None
     """Optional description"""
-
-    def get_type(self) -> str:
-        return "manual"
-
-    def supports_provider(self, provider: str) -> bool:
-        """Manual triggers are supported by all providers"""
-        return provider in ["aws", "gcp", "azure", "local"]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "manual",
-            "description": self.description,
-        }
 
     def __repr__(self):
         return "ManualTrigger()"

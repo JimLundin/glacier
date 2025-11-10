@@ -6,7 +6,7 @@ specific cloud provider implementation. The provider is chosen
 at compile/execution time.
 """
 
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import Any, Literal
 
 
@@ -17,49 +17,7 @@ class StorageResource(ABC):
     Storage resources define data storage requirements without
     being tied to a specific provider (AWS, GCP, Azure, local, etc.).
     """
-
-    @abstractmethod
-    def to_dict(self) -> dict[str, Any]:
-        """
-        Convert to dictionary representation for infrastructure generation.
-
-        Returns:
-            Dictionary with resource configuration
-        """
-        pass
-
-    @abstractmethod
-    def get_type(self) -> str:
-        """
-        Get the resource type identifier.
-
-        Returns:
-            Resource type string ('object_storage', 'database', 'cache', etc.)
-        """
-        pass
-
-    @abstractmethod
-    def get_provider(self) -> str | None:
-        """
-        Get the specific provider if this is a provider-specific resource.
-
-        Returns:
-            Provider name ('aws', 'gcp', 'azure') or None if generic
-        """
-        pass
-
-    @abstractmethod
-    def supports_provider(self, provider: str) -> bool:
-        """
-        Check if this resource can be compiled to the given provider.
-
-        Args:
-            provider: Provider name ('aws', 'gcp', 'azure', 'local')
-
-        Returns:
-            True if this resource supports the provider
-        """
-        pass
+    pass
 
 
 class ObjectStorage(StorageResource):
@@ -101,28 +59,6 @@ class ObjectStorage(StorageResource):
         self.encryption = encryption
         self.lifecycle_days = lifecycle_days
         self.provider_hints = provider_hints
-
-    def get_type(self) -> str:
-        return "object_storage"
-
-    def get_provider(self) -> str | None:
-        return None  # Generic resource
-
-    def supports_provider(self, provider: str) -> bool:
-        """Object storage is supported by all providers"""
-        return provider in ["aws", "gcp", "azure", "local"]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "object_storage",
-            "provider": None,
-            "resource_name": self.resource_name,
-            "access_pattern": self.access_pattern,
-            "versioning": self.versioning,
-            "encryption": self.encryption,
-            "lifecycle_days": self.lifecycle_days,
-            "provider_hints": self.provider_hints,
-        }
 
     def __repr__(self):
         name = f"name={self.resource_name}" if self.resource_name else "auto"
@@ -170,28 +106,6 @@ class Database(StorageResource):
         self.backup_retention_days = backup_retention_days
         self.provider_hints = provider_hints
 
-    def get_type(self) -> str:
-        return "database"
-
-    def get_provider(self) -> str | None:
-        return None  # Generic resource
-
-    def supports_provider(self, provider: str) -> bool:
-        """Database is supported by all providers"""
-        return provider in ["aws", "gcp", "azure", "local"]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "database",
-            "provider": None,
-            "engine": self.engine,
-            "size": self.size,
-            "resource_name": self.resource_name,
-            "high_availability": self.high_availability,
-            "backup_retention_days": self.backup_retention_days,
-            "provider_hints": self.provider_hints,
-        }
-
     def __repr__(self):
         name = f"name={self.resource_name}" if self.resource_name else "auto"
         return f"Database({name}, engine={self.engine}, size={self.size})"
@@ -232,27 +146,6 @@ class Cache(StorageResource):
         self.resource_name = resource_name
         self.provider_hints = provider_hints
 
-    def get_type(self) -> str:
-        return "cache"
-
-    def get_provider(self) -> str | None:
-        return None  # Generic resource
-
-    def supports_provider(self, provider: str) -> bool:
-        """Cache is supported by all providers"""
-        return provider in ["aws", "gcp", "azure", "local"]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "cache",
-            "provider": None,
-            "size_mb": self.size_mb,
-            "ttl_seconds": self.ttl_seconds,
-            "engine": self.engine,
-            "resource_name": self.resource_name,
-            "provider_hints": self.provider_hints,
-        }
-
     def __repr__(self):
         name = f"name={self.resource_name}" if self.resource_name else "auto"
         return f"Cache({name}, engine={self.engine}, size={self.size_mb}MB)"
@@ -292,27 +185,6 @@ class Queue(StorageResource):
         self.retention_seconds = retention_seconds
         self.visibility_timeout = visibility_timeout
         self.provider_hints = provider_hints
-
-    def get_type(self) -> str:
-        return "queue"
-
-    def get_provider(self) -> str | None:
-        return None  # Generic resource
-
-    def supports_provider(self, provider: str) -> bool:
-        """Queue is supported by all providers"""
-        return provider in ["aws", "gcp", "azure", "local"]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "queue",
-            "provider": None,
-            "resource_name": self.resource_name,
-            "fifo": self.fifo,
-            "retention_seconds": self.retention_seconds,
-            "visibility_timeout": self.visibility_timeout,
-            "provider_hints": self.provider_hints,
-        }
 
     def __repr__(self):
         name = f"name={self.resource_name}" if self.resource_name else "auto"
