@@ -6,8 +6,7 @@ specific cloud provider implementation. The provider is chosen
 at compile/execution time.
 """
 
-from abc import ABC, abstractmethod
-from typing import Any
+from abc import ABC
 from dataclasses import dataclass
 
 
@@ -18,26 +17,7 @@ class ComputeResource(ABC):
     Compute resources define execution requirements without
     being tied to a specific provider (AWS, GCP, local, etc.).
     """
-
-    @abstractmethod
-    def to_dict(self) -> dict[str, Any]:
-        """
-        Convert to dictionary representation for infrastructure generation.
-
-        Returns:
-            Dictionary with resource configuration
-        """
-        pass
-
-    @abstractmethod
-    def get_type(self) -> str:
-        """
-        Get the resource type identifier.
-
-        Returns:
-            Resource type string ('local', 'container', 'serverless', etc.)
-        """
-        pass
+    pass
 
 
 @dataclass
@@ -53,15 +33,6 @@ class Local(ComputeResource):
 
     workers: int = 1
     """Number of parallel workers"""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "local",
-            "workers": self.workers,
-        }
-
-    def get_type(self) -> str:
-        return "local"
 
     def __repr__(self):
         return f"Local(workers={self.workers})"
@@ -95,19 +66,6 @@ class Container(ComputeResource):
     env: dict[str, str] | None = None
     """Environment variables"""
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "container",
-            "image": self.image,
-            "cpu": self.cpu,
-            "memory": self.memory,
-            "gpu": self.gpu,
-            "env": self.env or {},
-        }
-
-    def get_type(self) -> str:
-        return "container"
-
     def __repr__(self):
         return f"Container(image={self.image}, cpu={self.cpu}, memory={self.memory})"
 
@@ -135,18 +93,6 @@ class Serverless(ComputeResource):
 
     env: dict[str, str] | None = None
     """Environment variables"""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "serverless",
-            "memory": self.memory,
-            "timeout": self.timeout,
-            "runtime": self.runtime,
-            "env": self.env or {},
-        }
-
-    def get_type(self) -> str:
-        return "serverless"
 
     def __repr__(self):
         return f"Serverless(memory={self.memory}, timeout={self.timeout})"

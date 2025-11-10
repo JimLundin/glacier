@@ -36,15 +36,6 @@ class LoggingConfig:
     include_context: bool = True
     """Include task/pipeline context in logs"""
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "level": self.level,
-            "retention_days": self.retention_days,
-            "structured": self.structured,
-            "include_context": self.include_context,
-        }
-
     def __repr__(self):
         return f"LoggingConfig(level={self.level}, retention={self.retention_days}d)"
 
@@ -84,16 +75,6 @@ class MetricsConfig:
 
     custom_metrics: dict[str, str] | None = None
     """Custom metric definitions"""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "enabled": self.enabled,
-            "track_duration": self.track_duration,
-            "track_success_rate": self.track_success_rate,
-            "track_data_volume": self.track_data_volume,
-            "track_resource_usage": self.track_resource_usage,
-            "custom_metrics": self.custom_metrics or {},
-        }
 
     def __repr__(self):
         metrics = []
@@ -148,18 +129,6 @@ class NotificationChannel:
     metadata: dict[str, Any] | None = None
     """Additional provider-specific metadata"""
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": self.type,
-            "destination": self.destination,
-            "name": self.name,
-            "enabled": self.enabled,
-            "notify_on_failure": self.notify_on_failure,
-            "notify_on_success": self.notify_on_success,
-            "notify_on_start": self.notify_on_start,
-            "metadata": self.metadata or {},
-        }
-
     def __repr__(self):
         name_str = f"{self.name}: " if self.name else ""
         return f"NotificationChannel({name_str}{self.type} -> {self.destination})"
@@ -213,17 +182,6 @@ class MonitoringConfig:
         """
         self.notifications.append(channel)
         return self
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "logging": self.logging.to_dict(),
-            "metrics": self.metrics.to_dict(),
-            "notifications": [n.to_dict() for n in self.notifications],
-            "alert_on_failure": self.alert_on_failure,
-            "alert_on_slow_execution": self.alert_on_slow_execution,
-            "slow_threshold_multiplier": self.slow_threshold_multiplier,
-            "enable_tracing": self.enable_tracing,
-        }
 
     def __repr__(self):
         components = []

@@ -5,8 +5,8 @@ These resources define secure credential storage without being tied
 to a specific provider implementation.
 """
 
-from abc import ABC, abstractmethod
-from typing import Any, Literal
+from abc import ABC
+from typing import Literal
 from dataclasses import dataclass
 
 
@@ -18,49 +18,7 @@ class SecretResource(ABC):
     being tied to a specific provider (AWS Secrets Manager,
     Azure Key Vault, GCP Secret Manager, local env vars, etc.).
     """
-
-    @abstractmethod
-    def to_dict(self) -> dict[str, Any]:
-        """
-        Convert to dictionary representation for infrastructure generation.
-
-        Returns:
-            Dictionary with resource configuration
-        """
-        pass
-
-    @abstractmethod
-    def get_type(self) -> str:
-        """
-        Get the resource type identifier.
-
-        Returns:
-            Resource type string ('secret', 'secret_version', etc.)
-        """
-        pass
-
-    @abstractmethod
-    def get_provider(self) -> str | None:
-        """
-        Get the specific provider if this is a provider-specific resource.
-
-        Returns:
-            Provider name ('aws', 'gcp', 'azure') or None if generic
-        """
-        pass
-
-    @abstractmethod
-    def supports_provider(self, provider: str) -> bool:
-        """
-        Check if this resource can be compiled to the given provider.
-
-        Args:
-            provider: Provider name ('aws', 'gcp', 'azure', 'local')
-
-        Returns:
-            True if this resource supports the provider
-        """
-        pass
+    pass
 
 
 @dataclass
@@ -96,27 +54,6 @@ class Secret(SecretResource):
 
     tags: dict[str, str] | None = None
     """Optional tags for organization"""
-
-    def get_type(self) -> str:
-        return "secret"
-
-    def get_provider(self) -> str | None:
-        return None  # Generic resource
-
-    def supports_provider(self, provider: str) -> bool:
-        """Secrets are supported by all providers"""
-        return provider in ["aws", "gcp", "azure", "local"]
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "type": "secret",
-            "provider": None,
-            "name": self.name,
-            "description": self.description,
-            "rotation_days": self.rotation_days,
-            "secret_type": self.type,
-            "tags": self.tags or {},
-        }
 
     def __repr__(self):
         rotation = f", rotation={self.rotation_days}d" if self.rotation_days else ""
