@@ -8,10 +8,14 @@ from glacier.compilation.compiler import (
 from glacier.compilation.pulumi_compiler import (
     PulumiCompiler,
 )
+from glacier.compilation.stack_compiler import (
+    StackCompiler,
+)
 
 __all__ = [
     "Compiler",
     "CompiledPipeline",
     "CompilationError",
     "PulumiCompiler",
+    "StackCompiler",
 ]

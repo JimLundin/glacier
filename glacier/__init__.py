@@ -40,6 +40,7 @@ from glacier.core.dataset import Dataset
 from glacier.core.task import task, Task
 from glacier.core.pipeline import Pipeline
 from glacier.core.environment import Environment, Provider
+from glacier.core.stack import Stack
 import glacier.compute as compute
 import glacier.storage as storage
 import glacier.secrets as secrets
@@ -54,6 +55,7 @@ __all__ = [
     "Pipeline",
     "Environment",
     "Provider",
+    "Stack",
     "compute",
     "storage",
     "secrets",
