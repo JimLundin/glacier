@@ -6,7 +6,6 @@ cloud providers. When deployed, it creates the compute and orchestration
 infrastructure needed to run the pipelines.
 """
 
-from typing import Any
 from dataclasses import dataclass, field
 
 from glacier.core.environment import Environment, Provider
@@ -65,7 +64,7 @@ class Stack:
     _pipelines: dict[str, Pipeline] = field(default_factory=dict)
     """Pipelines in this stack"""
 
-    _resources: dict[str, Any] = field(default_factory=dict)
+    _resources: dict[str, object] = field(default_factory=dict)
     """Shared resources (databases, secrets, etc.)"""
 
     def environment(
@@ -122,7 +121,7 @@ class Stack:
         self._pipelines[name] = pipeline
         return pipeline
 
-    def track_resource(self, name: str, resource: Any):
+    def track_resource(self, name: str, resource: object):
         """
         Track a shared resource in this stack.
 
@@ -139,7 +138,7 @@ class Stack:
         """
         self._resources[name] = resource
 
-    def compile(self) -> 'CompiledStack':
+    def compile(self) -> CompiledStack:
         """
         Compile the stack to create compute and orchestration infrastructure.
 
@@ -184,7 +183,7 @@ class Stack:
         """Get pipeline by name."""
         return self._pipelines.get(name)
 
-    def get_resource(self, name: str) -> Any | None:
+    def get_resource(self, name: str) -> object | None:
         """Get resource by name."""
         return self._resources.get(name)
 
@@ -203,13 +202,13 @@ class CompiledStack:
     stack_name: str
     """Stack name"""
 
-    resources: dict[str, Any]
+    resources: dict[str, object]
     """All Pulumi resources (infrastructure + compute + orchestration)"""
 
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, int | str] = field(default_factory=dict)
     """Compilation metadata"""
 
-    def get_resource(self, name: str) -> Any | None:
+    def get_resource(self, name: str) -> object | None:
         """Get a resource by name."""
         return self.resources.get(name)
 
@@ -232,7 +231,7 @@ class CompiledStack:
             by_provider[provider].append(name)
         return by_provider
 
-    def _infer_provider(self, resource: Any) -> str:
+    def _infer_provider(self, resource: object) -> str:
         """Infer provider from Pulumi resource type."""
         resource_type = type(resource).__module__
         if 'pulumi_aws' in resource_type:
@@ -244,7 +243,7 @@ class CompiledStack:
         else:
             return 'unknown'
 
-    def export_outputs(self) -> dict[str, Any]:
+    def export_outputs(self) -> dict[str, object]:
         """
         Create Pulumi stack outputs for all resources.
 
