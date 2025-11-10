@@ -15,10 +15,10 @@ if TYPE_CHECKING:
 
 class CompiledPipeline:
     """
-    Represents a compiled pipeline ready for deployment.
+    Represents a compiled pipeline with Pulumi resources.
 
-    Contains infrastructure definitions and deployment artifacts
-    generated from a Glacier pipeline.
+    Contains actual Pulumi resource objects that have been registered
+    with the Pulumi runtime.
     """
 
     def __init__(
@@ -34,7 +34,7 @@ class CompiledPipeline:
         Args:
             pipeline_name: Name of the source pipeline
             provider_name: Cloud provider (aws, gcp, azure)
-            resources: Dictionary of compiled infrastructure resources
+            resources: Dictionary of Pulumi resource objects
             metadata: Optional metadata about compilation
         """
         self.pipeline_name = pipeline_name
@@ -42,25 +42,36 @@ class CompiledPipeline:
         self.resources = resources
         self.metadata = metadata or {}
 
-    def export_pulumi(self, output_dir: str | Path) -> Path:
-        """
-        Export as Pulumi program.
-
-        Args:
-            output_dir: Directory to write Pulumi program files
-
-        Returns:
-            Path to the generated Pulumi program directory
-        """
-        raise NotImplementedError("Subclass must implement export_pulumi()")
-
     def get_resource(self, name: str) -> Any:
-        """Get a specific compiled resource by name."""
+        """Get a specific Pulumi resource by name."""
         return self.resources.get(name)
 
     def list_resources(self) -> list[str]:
-        """List all compiled resource names."""
+        """List all resource names."""
         return list(self.resources.keys())
+
+    def export_outputs(self) -> dict[str, Any]:
+        """
+        Create Pulumi stack outputs for all resources.
+
+        Returns:
+            Dictionary of outputs
+        """
+        try:
+            import pulumi
+        except ImportError:
+            raise ImportError("pulumi required for export_outputs()")
+
+        outputs = {}
+        for name, resource in self.resources.items():
+            if hasattr(resource, 'id'):
+                pulumi.export(name, resource.id)
+                outputs[name] = resource.id
+            elif hasattr(resource, 'arn'):
+                pulumi.export(f"{name}_arn", resource.arn)
+                outputs[f"{name}_arn"] = resource.arn
+
+        return outputs
 
 
 class Compiler(ABC):
