@@ -7,9 +7,20 @@ infrastructure needed to run the pipelines.
 """
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, TypedDict
 
 from glacier.core.environment import Environment, Provider
 from glacier.core.pipeline import Pipeline
+
+if TYPE_CHECKING:
+    import pulumi
+
+
+class StackMetadata(TypedDict, total=False):
+    """Metadata about stack compilation."""
+    environment_count: int
+    pipeline_count: int
+    resource_count: int
 
 
 @dataclass
@@ -17,55 +28,16 @@ class Stack:
     """
     Container for all infrastructure in a deployment.
 
-    The Stack is the top-level organizational unit that tracks:
+    The Stack is the compilation unit that tracks:
     - Environments (which create infrastructure resources)
     - Pipelines (which define compute logic)
     - Shared resources (databases, secrets, etc.)
-
-    Resources created via environments (object_storage, database, etc.)
-    are Pulumi resources created immediately. Stack compilation creates
-    the compute infrastructure (Lambda, Cloud Functions) and wiring
-    (IAM, triggers, orchestration) needed to run the pipelines.
-
-    Example:
-        from glacier import Stack
-        from glacier_aws import AWSProvider
-
-        # Create stack
-        stack = Stack(name="my-deployment")
-
-        # Add environments (creates infrastructure resources)
-        aws_env = stack.environment(
-            provider=AWSProvider(account="...", region="us-east-1"),
-            name="aws-prod"
-        )
-
-        # Resources created immediately (Pulumi resources)
-        db = aws_env.database("analytics")
-        storage = aws_env.object_storage("raw-data")
-
-        # Add pipelines (defines compute logic)
-        pipeline = stack.pipeline(name="etl")
-
-        @pipeline.task()
-        def extract() -> raw:
-            return data
-
-        # Deploy - creates compute and wiring
-        stack.deploy()  # or just run as Pulumi program
     """
 
     name: str
-    """Stack name"""
-
-    _environments: dict[str, Environment] = field(default_factory=dict)
-    """Environments in this stack"""
-
-    _pipelines: dict[str, Pipeline] = field(default_factory=dict)
-    """Pipelines in this stack"""
-
-    _resources: dict[str, object] = field(default_factory=dict)
-    """Shared resources (databases, secrets, etc.)"""
+    _environments: dict[str, Environment] = field(default_factory=dict, init=False)
+    _pipelines: dict[str, Pipeline] = field(default_factory=dict, init=False)
+    _resources: dict[str, pulumi.Resource] = field(default_factory=dict, init=False)
 
     def environment(
         self,
@@ -73,69 +45,19 @@ class Stack:
         name: str,
         tags: dict[str, str] | None = None
     ) -> Environment:
-        """
-        Create an environment in this stack.
-
-        Resources created via the environment (object_storage, database, etc.)
-        are Pulumi resources created immediately.
-
-        Args:
-            provider: Cloud provider implementation
-            name: Environment name
-            tags: Optional tags for all resources
-
-        Returns:
-            Environment instance
-
-        Example:
-            aws_env = stack.environment(
-                provider=AWSProvider(account="123", region="us-east-1"),
-                name="aws-prod"
-            )
-
-            # This creates a Pulumi S3 bucket immediately
-            bucket = aws_env.object_storage("data")
-        """
+        """Create an environment in this stack."""
         env = Environment(provider=provider, name=name, tags=tags)
         self._environments[name] = env
         return env
 
     def pipeline(self, name: str) -> Pipeline:
-        """
-        Create a pipeline in this stack.
-
-        Args:
-            name: Pipeline name
-
-        Returns:
-            Pipeline instance
-
-        Example:
-            pipeline = stack.pipeline(name="etl")
-
-            @pipeline.task()
-            def extract() -> raw:
-                return data
-        """
+        """Create a pipeline in this stack."""
         pipeline = Pipeline(name=name)
         self._pipelines[name] = pipeline
         return pipeline
 
-    def track_resource(self, name: str, resource: object):
-        """
-        Track a shared resource in this stack.
-
-        Use this for resources that are shared across pipelines
-        (databases, secrets, etc.)
-
-        Args:
-            name: Resource identifier
-            resource: Pulumi resource object
-
-        Example:
-            db = aws_env.database("analytics")
-            stack.track_resource("analytics-db", db)
-        """
+    def track_resource(self, name: str, resource: pulumi.Resource):
+        """Track a shared resource in this stack."""
         self._resources[name] = resource
 
     def compile(self) -> CompiledStack:
@@ -147,33 +69,11 @@ class Stack:
         - IAM policies connecting tasks to storage/databases
         - Orchestration (EventBridge rules, Cloud Scheduler jobs)
         - Monitoring (CloudWatch, Cloud Logging)
-
-        Resources created via environments are already Pulumi resources
-        and don't need compilation.
-
-        Returns:
-            CompiledStack with all infrastructure
-
-        Example:
-            compiled = stack.compile()
-            compiled.export_outputs()
         """
         from glacier.compilation.stack_compiler import StackCompiler
 
         compiler = StackCompiler()
         return compiler.compile(self)
-
-    def list_environments(self) -> list[str]:
-        """List all environment names."""
-        return list(self._environments.keys())
-
-    def list_pipelines(self) -> list[str]:
-        """List all pipeline names."""
-        return list(self._pipelines.keys())
-
-    def list_resources(self) -> list[str]:
-        """List all tracked resource names."""
-        return list(self._resources.keys())
 
     def get_environment(self, name: str) -> Environment | None:
         """Get environment by name."""
@@ -183,47 +83,26 @@ class Stack:
         """Get pipeline by name."""
         return self._pipelines.get(name)
 
-    def get_resource(self, name: str) -> object | None:
+    def get_resource(self, name: str) -> pulumi.Resource | None:
         """Get resource by name."""
         return self._resources.get(name)
 
 
 @dataclass
 class CompiledStack:
-    """
-    A compiled stack with all infrastructure resources.
-
-    Contains:
-    - Infrastructure resources (from environments)
-    - Compute resources (from compilation)
-    - Orchestration resources (from compilation)
-    """
+    """A compiled stack with all infrastructure resources."""
 
     stack_name: str
-    """Stack name"""
+    resources: dict[str, pulumi.Resource]
+    metadata: StackMetadata = field(default_factory=dict)
 
-    resources: dict[str, object]
-    """All Pulumi resources (infrastructure + compute + orchestration)"""
-
-    metadata: dict[str, int | str] = field(default_factory=dict)
-    """Compilation metadata"""
-
-    def get_resource(self, name: str) -> object | None:
+    def get_resource(self, name: str) -> pulumi.Resource | None:
         """Get a resource by name."""
         return self.resources.get(name)
 
-    def list_resources(self) -> list[str]:
-        """List all resource names."""
-        return list(self.resources.keys())
-
     def get_resources_by_provider(self) -> dict[str, list[str]]:
-        """
-        Group resources by cloud provider.
-
-        Returns:
-            Dictionary mapping provider names to lists of resource names
-        """
-        by_provider = {}
+        """Group resources by cloud provider."""
+        by_provider: dict[str, list[str]] = {}
         for name, resource in self.resources.items():
             provider = self._infer_provider(resource)
             if provider not in by_provider:
@@ -231,7 +110,7 @@ class CompiledStack:
             by_provider[provider].append(name)
         return by_provider
 
-    def _infer_provider(self, resource: object) -> str:
+    def _infer_provider(self, resource: pulumi.Resource) -> str:
         """Infer provider from Pulumi resource type."""
         resource_type = type(resource).__module__
         if 'pulumi_aws' in resource_type:
@@ -240,22 +119,13 @@ class CompiledStack:
             return 'gcp'
         elif 'pulumi_azure' in resource_type or 'pulumi_azure_native' in resource_type:
             return 'azure'
-        else:
-            return 'unknown'
+        return 'unknown'
 
-    def export_outputs(self) -> dict[str, object]:
-        """
-        Create Pulumi stack outputs for all resources.
+    def export_outputs(self) -> dict[str, pulumi.Output]:
+        """Create Pulumi stack outputs for all resources."""
+        import pulumi
 
-        Returns:
-            Dictionary of outputs
-        """
-        try:
-            import pulumi
-        except ImportError:
-            raise ImportError("pulumi required for export_outputs()")
-
-        outputs = {}
+        outputs: dict[str, pulumi.Output] = {}
         for name, resource in self.resources.items():
             if hasattr(resource, 'id'):
                 pulumi.export(name, resource.id)

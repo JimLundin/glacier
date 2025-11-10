@@ -7,8 +7,21 @@ may use different cloud providers (AWS, GCP, Azure).
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, TypedDict
 
 from glacier.core.pipeline import Pipeline
+
+if TYPE_CHECKING:
+    import pulumi
+
+
+class PipelineMetadata(TypedDict, total=False):
+    """Metadata about pipeline compilation."""
+    task_count: int
+    dataset_count: int
+    region: str
+    account: str
+    project: str
 
 
 @dataclass
@@ -21,10 +34,10 @@ class CompiledPipeline:
     """
 
     pipeline_name: str
-    resources: dict[str, object]
-    metadata: dict[str, int | str] = field(default_factory=dict)
+    resources: dict[str, pulumi.Resource]
+    metadata: PipelineMetadata = field(default_factory=dict)
 
-    def get_resource(self, name: str) -> object | None:
+    def get_resource(self, name: str) -> pulumi.Resource | None:
         """Get a specific Pulumi resource by name."""
         return self.resources.get(name)
 
@@ -38,7 +51,7 @@ class CompiledPipeline:
             by_provider[provider].append(name)
         return by_provider
 
-    def _infer_provider(self, resource: object) -> str:
+    def _infer_provider(self, resource: pulumi.Resource) -> str:
         """Infer provider from Pulumi resource type."""
         resource_type = type(resource).__module__
         if 'pulumi_aws' in resource_type:
@@ -47,17 +60,13 @@ class CompiledPipeline:
             return 'gcp'
         elif 'pulumi_azure' in resource_type or 'pulumi_azure_native' in resource_type:
             return 'azure'
-        else:
-            return 'unknown'
+        return 'unknown'
 
-    def export_outputs(self) -> dict[str, object]:
+    def export_outputs(self) -> dict[str, pulumi.Output]:
         """Create Pulumi stack outputs for all resources."""
-        try:
-            import pulumi
-        except ImportError:
-            raise ImportError("pulumi required for export_outputs()")
+        import pulumi
 
-        outputs: dict[str, object] = {}
+        outputs: dict[str, pulumi.Output] = {}
         for name, resource in self.resources.items():
             if hasattr(resource, 'id'):
                 pulumi.export(name, resource.id)
