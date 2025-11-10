@@ -138,6 +138,30 @@ class Pipeline:
             self._dag_built = True
         return self._tasks.copy()
 
+    @property
+    def datasets(self) -> list[Dataset]:
+        """
+        Get all datasets in the pipeline.
+
+        Collects unique datasets from all task inputs and outputs.
+        """
+        if not self._dag_built:
+            self._build_dag()
+            self._dag_built = True
+
+        datasets_set = set()
+
+        # Collect from task outputs
+        for task in self._tasks:
+            datasets_set.update(task.outputs)
+
+        # Collect from task inputs
+        for task in self._tasks:
+            for input_param in task.inputs:
+                datasets_set.add(input_param.dataset)
+
+        return list(datasets_set)
+
     def _build_dag(self):
         """
         Build the DAG by inferring dependencies from task signatures.
