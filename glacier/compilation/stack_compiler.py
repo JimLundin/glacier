@@ -5,7 +5,7 @@ Creates compute and orchestration infrastructure for pipelines,
 using infrastructure resources already created via environments.
 """
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 try:
     import pulumi
@@ -18,8 +18,9 @@ except ImportError:
 from glacier.compilation.compiler import CompilationError
 
 if TYPE_CHECKING:
-    from glacier.core.stack import Stack, CompiledStack
+    from glacier.core.environment import Environment
     from glacier.core.pipeline import Pipeline
+    from glacier.core.stack import CompiledStack, Stack
     from glacier.core.task import Task
 
 
@@ -84,7 +85,7 @@ class StackCompiler:
         except Exception as e:
             raise CompilationError(f"Failed to compile stack '{stack.name}': {e}") from e
 
-    def _collect_infrastructure_resources(self, stack: 'Stack') -> dict[str, Any]:
+    def _collect_infrastructure_resources(self, stack: 'Stack') -> dict[str, pulumi.Resource]:
         """
         Collect infrastructure resources from environments.
 
@@ -93,7 +94,7 @@ class StackCompiler:
 
         We don't recreate them - we just collect references.
         """
-        resources = {}
+        resources: dict[str, pulumi.Resource] = {}
 
         # Note: Infrastructure resources are already created and registered
         # with Pulumi. We don't need to do anything here - they're already
@@ -104,14 +105,14 @@ class StackCompiler:
 
         return resources
 
-    def _collect_dataset_resources(self, stack: 'Stack') -> dict[str, Any]:
+    def _collect_dataset_resources(self, stack: 'Stack') -> dict[str, pulumi.Resource]:
         """
         Collect storage resources attached to datasets.
 
         Datasets may have storage (S3 buckets, GCS buckets, etc.) that
         were created via environments. We collect references to them.
         """
-        resources = {}
+        resources: dict[str, pulumi.Resource] = {}
 
         for pipeline_name, pipeline in stack._pipelines.items():
             for dataset in pipeline.datasets:
@@ -121,7 +122,7 @@ class StackCompiler:
 
         return resources
 
-    def _compile_pipeline(self, stack: 'Stack', pipeline: 'Pipeline') -> dict[str, Any]:
+    def _compile_pipeline(self, stack: 'Stack', pipeline: 'Pipeline') -> dict[str, pulumi.Resource]:
         """
         Create compute and orchestration resources for a pipeline.
 
@@ -138,7 +139,7 @@ class StackCompiler:
         Returns:
             Dictionary of Pulumi resources
         """
-        resources = {}
+        resources: dict[str, pulumi.Resource] = {}
 
         # Validate pipeline
         pipeline.validate()
@@ -155,7 +156,7 @@ class StackCompiler:
         stack: 'Stack',
         pipeline: 'Pipeline',
         task: 'Task'
-    ) -> dict[str, Any]:
+    ) -> dict[str, pulumi.Resource]:
         """
         Create compute resources for a single task.
 
@@ -170,7 +171,7 @@ class StackCompiler:
         Returns:
             Dictionary of Pulumi resources
         """
-        resources = {}
+        resources: dict[str, pulumi.Resource] = {}
 
         # Get the task's environment
         environment = getattr(task, 'environment', None)
@@ -218,7 +219,7 @@ class StackCompiler:
 
         return resources
 
-    def _infer_task_environment(self, stack: 'Stack', task: 'Task') -> Any:
+    def _infer_task_environment(self, stack: 'Stack', task: 'Task') -> 'Environment | None':
         """
         Try to infer task environment from its input/output datasets.
 
@@ -248,10 +249,10 @@ class StackCompiler:
         stack: 'Stack',
         pipeline: 'Pipeline',
         task: 'Task',
-        provider: Any,
+        provider,
         memory: int,
         timeout: int
-    ) -> dict[str, Any]:
+    ) -> dict[str, pulumi.Resource]:
         """Create AWS Lambda resources for a task."""
         try:
             import pulumi_aws as aws
@@ -261,7 +262,7 @@ class StackCompiler:
                 "Install with: pip install pulumi-aws"
             )
 
-        resources = {}
+        resources: dict[str, pulumi.Resource] = {}
         function_name = f"{pipeline.name}-{task.name}".replace("_", "-")
 
         # Create IAM role
@@ -337,10 +338,10 @@ class StackCompiler:
         stack: 'Stack',
         pipeline: 'Pipeline',
         task: 'Task',
-        provider: Any,
+        provider,
         memory: int,
         timeout: int
-    ) -> dict[str, Any]:
+    ) -> dict[str, pulumi.Resource]:
         """Create GCP Cloud Function resources for a task."""
         try:
             import pulumi_gcp as gcp
@@ -350,7 +351,7 @@ class StackCompiler:
                 "Install with: pip install pulumi-gcp"
             )
 
-        resources = {}
+        resources: dict[str, pulumi.Resource] = {}
         function_name = f"{pipeline.name}-{task.name}".replace("_", "-")
 
         # GCP Cloud Function implementation would go here
@@ -362,10 +363,10 @@ class StackCompiler:
         stack: 'Stack',
         pipeline: 'Pipeline',
         task: 'Task',
-        provider: Any,
+        provider,
         memory: int,
         timeout: int
-    ) -> dict[str, Any]:
+    ) -> dict[str, pulumi.Resource]:
         """Create Azure Function resources for a task."""
         try:
             import pulumi_azure_native as azure
@@ -375,7 +376,7 @@ class StackCompiler:
                 "Install with: pip install pulumi-azure-native"
             )
 
-        resources = {}
+        resources: dict[str, pulumi.Resource] = {}
         function_name = f"{pipeline.name}-{task.name}".replace("_", "-")
 
         # Azure Function implementation would go here

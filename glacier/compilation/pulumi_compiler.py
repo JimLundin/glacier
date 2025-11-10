@@ -6,7 +6,7 @@ Tasks and datasets can use different providers (AWS, GCP, Azure) within
 the same pipeline.
 """
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 try:
     import pulumi
@@ -19,9 +19,9 @@ except ImportError:
 from glacier.compilation.compiler import Compiler, CompiledPipeline, CompilationError
 
 if TYPE_CHECKING:
+    from glacier.core.dataset import Dataset
     from glacier.core.pipeline import Pipeline
     from glacier.core.task import Task
-    from glacier.core.dataset import Dataset
 
 
 class PulumiCompiler(Compiler):
@@ -106,7 +106,7 @@ class PulumiCompiler(Compiler):
         except Exception as e:
             raise CompilationError(f"Failed to compile pipeline '{pipeline.name}': {e}") from e
 
-    def _compile_task(self, pipeline: 'Pipeline', task: 'Task') -> dict[str, Any]:
+    def _compile_task(self, pipeline: 'Pipeline', task: 'Task') -> dict[str, pulumi.Resource]:
         """
         Compile a single task to Pulumi resources.
 
@@ -120,7 +120,7 @@ class PulumiCompiler(Compiler):
         Returns:
             Dictionary of Pulumi resources for this task
         """
-        resources = {}
+        resources: dict[str, pulumi.Resource] = {}
 
         # Get the task's environment (which contains the provider)
         environment = getattr(task, 'environment', None)
@@ -168,10 +168,10 @@ class PulumiCompiler(Compiler):
         self,
         pipeline: 'Pipeline',
         task: 'Task',
-        provider: Any,
+        provider,
         memory: int,
         timeout: int
-    ) -> dict[str, Any]:
+    ) -> dict[str, pulumi.Resource]:
         """Create AWS Lambda resources for a task."""
         try:
             import pulumi_aws as aws
@@ -181,7 +181,7 @@ class PulumiCompiler(Compiler):
                 "Install with: pip install pulumi-aws"
             )
 
-        resources = {}
+        resources: dict[str, pulumi.Resource] = {}
         function_name = f"{pipeline.name}-{task.name}".replace("_", "-")
 
         # Create IAM role
@@ -255,10 +255,10 @@ class PulumiCompiler(Compiler):
         self,
         pipeline: 'Pipeline',
         task: 'Task',
-        provider: Any,
+        provider,
         memory: int,
         timeout: int
-    ) -> dict[str, Any]:
+    ) -> dict[str, pulumi.Resource]:
         """Create GCP Cloud Function resources for a task."""
         try:
             import pulumi_gcp as gcp
@@ -268,7 +268,7 @@ class PulumiCompiler(Compiler):
                 "Install with: pip install pulumi-gcp"
             )
 
-        resources = {}
+        resources: dict[str, pulumi.Resource] = {}
         function_name = f"{pipeline.name}-{task.name}".replace("_", "-")
 
         # Create Cloud Function
@@ -291,10 +291,10 @@ class PulumiCompiler(Compiler):
         self,
         pipeline: 'Pipeline',
         task: 'Task',
-        provider: Any,
+        provider,
         memory: int,
         timeout: int
-    ) -> dict[str, Any]:
+    ) -> dict[str, pulumi.Resource]:
         """Create Azure Function resources for a task."""
         try:
             import pulumi_azure_native as azure
@@ -304,14 +304,14 @@ class PulumiCompiler(Compiler):
                 "Install with: pip install pulumi-azure-native"
             )
 
-        resources = {}
+        resources: dict[str, pulumi.Resource] = {}
         function_name = f"{pipeline.name}-{task.name}".replace("_", "-")
 
         # Azure Function implementation would go here
         # This is a placeholder
         raise CompilationError("Azure Functions not yet implemented")
 
-    def _infer_provider(self, resource: Any) -> str:
+    def _infer_provider(self, resource: pulumi.Resource) -> str:
         """Infer provider from Pulumi resource type."""
         resource_type = type(resource).__module__
         if 'pulumi_aws' in resource_type:
