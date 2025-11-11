@@ -7,12 +7,19 @@ may use different cloud providers (AWS, GCP, Azure).
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, TypedDict
+from typing import TypedDict
 
 from glacier.core.pipeline import Pipeline
 
-if TYPE_CHECKING:
+try:
     import pulumi
+except ImportError:
+    # Create stub namespace for type annotations when pulumi not installed
+    class pulumi:  # type: ignore
+        class Resource:
+            pass
+        class Output:
+            pass
 
 
 class PipelineMetadata(TypedDict, total=False):
