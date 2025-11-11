@@ -123,12 +123,18 @@ class PulumiCompiler(Compiler):
         resources: dict[str, pulumi.Resource] = {}
 
         # Get the task's environment (which contains the provider)
-        environment = getattr(task, 'environment', None)
+        environment = task.config.get('environment')
         if environment is None:
-            raise CompilationError(
-                f"Task '{task.name}' must specify an environment. "
-                f"Use @pipeline.task(environment=env)"
-            )
+            # Fall back to default environment
+            from glacier.defaults import get_default_environment
+            try:
+                environment = get_default_environment()
+            except ImportError:
+                raise CompilationError(
+                    f"Task '{task.name}' must specify an environment. "
+                    f"Use @pipeline.task(environment=env) or install glacier-local "
+                    f"for default local environment."
+                )
 
         provider = environment.provider
         provider_name = provider.get_provider_name()

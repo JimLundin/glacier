@@ -174,16 +174,22 @@ class StackCompiler:
         resources: dict[str, pulumi.Resource] = {}
 
         # Get the task's environment
-        environment = getattr(task, 'environment', None)
+        environment = task.config.get('environment')
         if environment is None:
             # Try to infer environment from task's datasets
             environment = self._infer_task_environment(stack, task)
 
         if environment is None:
-            raise CompilationError(
-                f"Task '{task.name}' in pipeline '{pipeline.name}' must specify "
-                f"an environment or have datasets with storage"
-            )
+            # Fall back to default environment
+            from glacier.defaults import get_default_environment
+            try:
+                environment = get_default_environment()
+            except ImportError:
+                raise CompilationError(
+                    f"Task '{task.name}' in pipeline '{pipeline.name}' must specify "
+                    f"an environment or have datasets with storage. Alternatively, "
+                    f"install glacier-local for default local environment."
+                )
 
         provider = environment.provider
         provider_name = provider.get_provider_name()
