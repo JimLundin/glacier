@@ -116,7 +116,7 @@ class StackCompiler:
 
         for pipeline_name, pipeline in stack._pipelines.items():
             for dataset in pipeline.datasets:
-                if hasattr(dataset, 'storage') and dataset.storage is not None:
+                if dataset.storage is not None:
                     storage_name = f"{pipeline_name}-{dataset.name}-storage"
                     resources[storage_name] = dataset.storage
 
@@ -194,16 +194,14 @@ class StackCompiler:
         provider = environment.provider
         provider_name = provider.get_provider_name()
 
-        # Get compute config
-        compute_config = getattr(task, 'compute', None)
+        # Get compute config from task config
+        compute_config = task.config.get('compute')
         memory = 512
         timeout = 300
 
-        if compute_config:
-            if hasattr(compute_config, 'memory'):
-                memory = compute_config.memory
-            if hasattr(compute_config, 'timeout'):
-                timeout = compute_config.timeout
+        if compute_config is not None:
+            memory = compute_config.memory if compute_config.memory is not None else memory
+            timeout = compute_config.timeout if compute_config.timeout is not None else timeout
 
         # Create compute resources based on provider
         if provider_name == 'aws':
@@ -234,7 +232,7 @@ class StackCompiler:
         """
         # Look at output datasets first (task produces these)
         for output_dataset in task.outputs:
-            if hasattr(output_dataset, 'storage') and output_dataset.storage is not None:
+            if output_dataset.storage is not None:
                 # Find which environment created this storage
                 for env in stack._environments.values():
                     # Storage was created via this environment
@@ -244,7 +242,7 @@ class StackCompiler:
         # Look at input datasets
         for input_param in task.inputs:
             dataset = input_param.dataset
-            if hasattr(dataset, 'storage') and dataset.storage is not None:
+            if dataset.storage is not None:
                 for env in stack._environments.values():
                     return env
 

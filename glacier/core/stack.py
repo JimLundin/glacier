@@ -6,21 +6,16 @@ cloud providers. When deployed, it creates the compute and orchestration
 infrastructure needed to run the pipelines.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 from glacier.core.environment import Environment, Provider
 from glacier.core.pipeline import Pipeline
 
-try:
+if TYPE_CHECKING:
     import pulumi
-except ImportError:
-    # Create stub namespace for type annotations when pulumi not installed
-    class pulumi:  # type: ignore
-        class Resource:
-            pass
-        class Output:
-            pass
 
 
 class StackMetadata(TypedDict, total=False):

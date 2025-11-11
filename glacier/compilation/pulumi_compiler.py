@@ -139,16 +139,14 @@ class PulumiCompiler(Compiler):
         provider = environment.provider
         provider_name = provider.get_provider_name()
 
-        # Determine compute config
-        compute_config = getattr(task, 'compute', None)
+        # Get compute config from task config
+        compute_config = task.config.get('compute')
         memory = 512
         timeout = 300
 
-        if compute_config:
-            if hasattr(compute_config, 'memory'):
-                memory = compute_config.memory
-            if hasattr(compute_config, 'timeout'):
-                timeout = compute_config.timeout
+        if compute_config is not None:
+            memory = compute_config.memory if compute_config.memory is not None else memory
+            timeout = compute_config.timeout if compute_config.timeout is not None else timeout
 
         # Create compute resources based on provider
         if provider_name == 'aws':
