@@ -47,6 +47,14 @@ import glacier.secrets as secrets
 import glacier.scheduling as scheduling
 import glacier.monitoring as monitoring
 
+# Import factory functions that use defaults
+from glacier.defaults import (
+    object_storage,
+    database,
+    secret,
+    pipeline,
+)
+
 __version__ = "0.2.0-alpha"
 __all__ = [
     "Dataset",
@@ -61,4 +69,9 @@ __all__ = [
     "secrets",
     "scheduling",
     "monitoring",
+    # Factory functions
+    "object_storage",
+    "database",
+    "secret",
+    "pipeline",
 ]

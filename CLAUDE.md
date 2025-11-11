@@ -112,6 +112,62 @@ def process(x: raw) -> clean:
 - `glacier/core/task.py:45-70` - Task._extract_dataset_from_annotation() extracts instances
 - `glacier/core/task.py:71-121` - Task._extract_datasets() builds inputs/outputs
 
+### Progressive Disclosure API
+
+Glacier's API provides three levels of explicitness, allowing users to start simple and progressively add control:
+
+**Level 1: Implicit defaults** - Everything uses hidden module-level defaults:
+```python
+from glacier import Dataset, object_storage, pipeline
+
+raw = Dataset("raw")
+storage = object_storage("data")  # Uses default environment
+etl = pipeline("etl")  # Uses default stack
+
+@etl.task()  # Uses default environment
+def extract() -> raw:
+    return data
+```
+
+**Level 2: Explicit environment** - Specify cloud provider, stack is still implicit:
+```python
+from glacier import Environment
+from glacier_aws import AWSProvider
+
+aws = Environment(AWSProvider(...), "prod")
+storage = aws.object_storage("data")  # Explicit environment
+
+@etl.task(environment=aws)  # Explicit environment
+def extract() -> raw:
+    return data
+```
+
+**Level 3: Fully explicit** - Full control over Stack and Environment:
+```python
+from glacier import Stack
+from glacier_aws import AWSProvider
+
+stack = Stack("my-stack")
+aws = stack.environment(AWSProvider(...), "aws")
+storage = aws.object_storage("data")
+
+pipeline = stack.pipeline("etl")
+
+@pipeline.task(environment=aws)
+def extract() -> raw:
+    return data
+
+compiled = stack.compile()
+```
+
+**Implementation details:**
+- `glacier/defaults.py` - Default stack and environment (lazy-created)
+- `glacier/__init__.py` - Exports factory functions (`object_storage`, `pipeline`, etc.)
+- Factory functions internally use `get_default_stack()` and `get_default_environment()`
+- Default environment uses `LocalProvider` from `glacier-local` if installed
+- Compilers fall back to default environment if task doesn't specify one
+- Users never explicitly set defaults - they're hidden implementation details
+
 ### DAG Inference
 
 The Pipeline automatically builds a DAG by analyzing task signatures:
