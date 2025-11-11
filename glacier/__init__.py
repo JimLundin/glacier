@@ -40,7 +40,6 @@ from glacier.core.dataset import Dataset
 from glacier.core.task import task, Task
 from glacier.core.pipeline import Pipeline
 from glacier.core.environment import Environment, Provider
-from glacier.core.stack import Stack
 import glacier.compute as compute
 import glacier.storage as storage
 import glacier.secrets as secrets
@@ -55,6 +54,14 @@ from glacier.defaults import (
     pipeline,
 )
 
+# Stack requires pulumi for type hints - only import if available
+try:
+    from glacier.core.stack import Stack
+    _has_stack = True
+except (ImportError, NameError):
+    _has_stack = False
+    Stack = None  # type: ignore
+
 __version__ = "0.2.0-alpha"
 __all__ = [
     "Dataset",
@@ -63,7 +70,6 @@ __all__ = [
     "Pipeline",
     "Environment",
     "Provider",
-    "Stack",
     "compute",
     "storage",
     "secrets",
@@ -75,3 +81,7 @@ __all__ = [
     "secret",
     "pipeline",
 ]
+
+# Add Stack to exports if available
+if _has_stack:
+    __all__.append("Stack")
