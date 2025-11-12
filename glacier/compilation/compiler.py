@@ -5,16 +5,14 @@ Handles multi-cloud pipelines where different tasks and datasets
 may use different cloud providers (AWS, GCP, Azure).
 """
 
-from __future__ import annotations
-
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, TypedDict
+from typing import TypedDict
 
 from glacier.core.pipeline import Pipeline
 
-if TYPE_CHECKING:
-    import pulumi
+# Pulumi is a dev dependency for type hints
+import pulumi
 
 
 class PipelineMetadata(TypedDict, total=False):
