@@ -47,12 +47,13 @@ import glacier.secrets as secrets
 import glacier.scheduling as scheduling
 import glacier.monitoring as monitoring
 
-# Import factory functions that use defaults
-from glacier.defaults import (
+# Import factory functions that accept optional parent objects
+from glacier.core.factories import (
+    pipeline,
+    environment,
     object_storage,
     database,
     secret,
-    pipeline,
 )
 
 __version__ = "0.2.0-alpha"
@@ -69,9 +70,10 @@ __all__ = [
     "secrets",
     "scheduling",
     "monitoring",
-    # Factory functions
+    # Factory functions (primary API for progressive disclosure)
+    "pipeline",
+    "environment",
     "object_storage",
     "database",
     "secret",
-    "pipeline",
 ]

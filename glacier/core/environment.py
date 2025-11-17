@@ -91,6 +91,8 @@ class Environment:
         """
         Create object storage (provider-agnostic).
 
+        This is a convenience method that proxies to the factory function.
+
         Maps to:
         - S3 on AWS
         - Blob Storage on Azure
@@ -103,7 +105,8 @@ class Environment:
         Returns:
             Pulumi resource for the object storage
         """
-        return self.provider.object_storage(name=name, env_tags=self.tags, **kwargs)
+        from glacier.core.factories import object_storage as object_storage_factory
+        return object_storage_factory(name, environment=self, **kwargs)
 
     def serverless(self, name: str, handler: str, code: Any, **kwargs) -> Any:
         """
@@ -123,6 +126,7 @@ class Environment:
         Returns:
             Pulumi resource for the serverless function
         """
+        # Serverless doesn't have a factory yet - direct call for now
         return self.provider.serverless(
             name=name, handler=handler, code=code, env_tags=self.tags, **kwargs
         )
@@ -130,6 +134,8 @@ class Environment:
     def database(self, name: str, engine: str = "postgres", **kwargs) -> Any:
         """
         Create managed database (provider-agnostic).
+
+        This is a convenience method that proxies to the factory function.
 
         Maps to:
         - RDS on AWS
@@ -144,13 +150,14 @@ class Environment:
         Returns:
             Pulumi resource for the database
         """
-        return self.provider.database(
-            name=name, engine=engine, env_tags=self.tags, **kwargs
-        )
+        from glacier.core.factories import database as database_factory
+        return database_factory(name, environment=self, engine=engine, **kwargs)
 
     def secret(self, name: str, secret_string: str | None = None, **kwargs) -> Any:
         """
         Create secret storage (provider-agnostic).
+
+        This is a convenience method that proxies to the factory function.
 
         Maps to:
         - Secrets Manager on AWS
@@ -179,9 +186,8 @@ class Environment:
                 connection_secret=db_password
             )
         """
-        return self.provider.secret(
-            name=name, secret_string=secret_string, env_tags=self.tags, **kwargs
-        )
+        from glacier.core.factories import secret as secret_factory
+        return secret_factory(name, environment=self, secret_string=secret_string, **kwargs)
 
     def __repr__(self):
         provider_name = self.provider.get_provider_name()
