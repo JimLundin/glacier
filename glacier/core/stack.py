@@ -7,13 +7,13 @@ infrastructure needed to run the pipelines.
 """
 
 from dataclasses import dataclass, field
-from typing import TypedDict
+from typing import TypedDict, TYPE_CHECKING
 
 from glacier.core.environment import Environment, Provider
 from glacier.core.pipeline import Pipeline
 
-# Pulumi is a dev dependency for type hints
-import pulumi
+if TYPE_CHECKING:
+    import pulumi
 
 
 class StackMetadata(TypedDict, total=False):
@@ -28,10 +28,10 @@ class CompiledStack:
     """A compiled stack with all infrastructure resources."""
 
     stack_name: str
-    resources: dict[str, pulumi.Resource]
+    resources: "dict[str, pulumi.Resource]"
     metadata: StackMetadata = field(default_factory=dict)
 
-    def get_resource(self, name: str) -> pulumi.Resource | None:
+    def get_resource(self, name: str) -> "pulumi.Resource | None":
         """Get a resource by name."""
         return self.resources.get(name)
 
@@ -45,7 +45,7 @@ class CompiledStack:
             by_provider[provider].append(name)
         return by_provider
 
-    def _infer_provider(self, resource: pulumi.Resource) -> str:
+    def _infer_provider(self, resource: "pulumi.Resource") -> str:
         """Infer provider from Pulumi resource type."""
         resource_type = type(resource).__module__
         if 'pulumi_aws' in resource_type:
@@ -56,7 +56,7 @@ class CompiledStack:
             return 'azure'
         return 'unknown'
 
-    def export_outputs(self) -> dict[str, pulumi.Output]:
+    def export_outputs(self) -> "dict[str, pulumi.Output]":
         """Create Pulumi stack outputs for all resources."""
         import pulumi
 
@@ -86,7 +86,7 @@ class Stack:
     name: str
     _environments: dict[str, Environment] = field(default_factory=dict, init=False)
     _pipelines: dict[str, Pipeline] = field(default_factory=dict, init=False)
-    _resources: dict[str, pulumi.Resource] = field(default_factory=dict, init=False)
+    _resources: "dict[str, pulumi.Resource]" = field(default_factory=dict, init=False)
 
     def environment(
         self,
@@ -94,18 +94,38 @@ class Stack:
         name: str,
         tags: dict[str, str] | None = None
     ) -> Environment:
-        """Create an environment in this stack."""
-        env = Environment(provider=provider, name=name, tags=tags)
-        self._environments[name] = env
-        return env
+        """
+        Create an environment in this stack.
+
+        This is a convenience method that proxies to the factory function.
+
+        Args:
+            provider: Provider implementation (AWSProvider, AzureProvider, etc.)
+            name: Environment name
+            tags: Optional tags to apply to all resources
+
+        Returns:
+            Environment instance registered with this stack
+        """
+        from glacier.core.factories import environment as environment_factory
+        return environment_factory(provider, name, stack=self, tags=tags)
 
     def pipeline(self, name: str) -> Pipeline:
-        """Create a pipeline in this stack."""
-        pipeline = Pipeline(name=name)
-        self._pipelines[name] = pipeline
-        return pipeline
+        """
+        Create a pipeline in this stack.
 
-    def track_resource(self, name: str, resource: pulumi.Resource):
+        This is a convenience method that proxies to the factory function.
+
+        Args:
+            name: Pipeline name
+
+        Returns:
+            Pipeline instance registered with this stack
+        """
+        from glacier.core.factories import pipeline as pipeline_factory
+        return pipeline_factory(name, stack=self)
+
+    def track_resource(self, name: str, resource: "pulumi.Resource") -> None:
         """Track a shared resource in this stack."""
         self._resources[name] = resource
 
@@ -132,6 +152,6 @@ class Stack:
         """Get pipeline by name."""
         return self._pipelines.get(name)
 
-    def get_resource(self, name: str) -> pulumi.Resource | None:
+    def get_resource(self, name: str) -> "pulumi.Resource | None":
         """Get resource by name."""
         return self._resources.get(name)
